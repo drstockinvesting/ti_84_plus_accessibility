@@ -48,15 +48,43 @@ calculator, exactly like the real thing.
 * **View ▸ Classic / Day / Night / Night Amber** (⌘1–⌘4) — swaps both the LCD
   palette and the skin. Day is black on pure white; Night is white on black;
   Night Amber is amber on black.
-* **View ▸ Screen Only** (⌘0) — hides the skin and fills the window with the
-  screen, at whatever size the window is. This is the magnification mode.
-* **View ▸ Actual Size / Fit to Screen** (⌘=, ⌘F).
+* **View ▸ Detached LCD Screen** (⌘0) — opens a second window showing nothing
+  but the calculator's screen, mirroring the one on the skin. Resize it as large
+  as you like; it keeps the LCD's 3:2 shape so the pixels stay square, and draws
+  with nearest-neighbour sampling so they stay hard-edged at any size. It stays
+  open between launches and follows the current theme. (This replaces the old
+  "Screen Only" view, which took the calculator away while it was on.)
+* **View ▸ Magnifier (4×)** (⌘Z) — see below.
+* **View ▸ Actual Size / Fit to Screen** (⌘=, ⌘F) act on whichever window is in
+  front. For the detached LCD, *Actual Size* snaps to the nearest whole-pixel
+  scale, so every LCD pixel is exactly N×N screen pixels.
 * **Calculator ▸ Press ON**, **Screen Darker / Lighter** (sends 2nd ▲ / 2nd ▼).
 * **File ▸ Reset Calculator** (⌘R) wipes RAM like pulling the batteries.
 
 Unlike WabbitEmu the window has **no minimum size tied to the skin's pixel
 size** — it scales from 160 px wide up to the full screen, so the same skin works
 on a laptop and on a large monitor.
+
+### The click-and-hold magnifier
+
+**Press and hold the mouse button for about half a second** anywhere on the
+calculator and the window zooms to 4×, centred on the pointer. Hold again, or
+press **Escape**, to go back. ⌘Z does the same thing from the keyboard.
+
+While it is zoomed:
+
+* moving the pointer pans the view, and **whatever is under the pointer stays
+  under the pointer** — the zoom never slides the thing you are looking at away.
+  Sweeping the pointer across the window reaches every part of the calculator,
+  including the corners.
+* clicks still press keys, at the place you are pointing.
+* a bright yellow frame and the window title (`4× magnifier`) say it is on.
+
+Because a *hold* means "magnify", a mouse click now presses its key on release
+rather than on press, and holding the mouse on a key no longer auto-repeats it.
+**Hold the key on the Mac keyboard instead** — arrows, DEL and the rest repeat
+exactly as on a real calculator. Escape leaves the magnifier if it is on, and
+otherwise sends CLEAR as before.
 
 ### Keyboard
 
@@ -65,7 +93,7 @@ on a laptop and on a large monitor.
 | `0`–`9` `.` `+` `-` `*` `/` `^` `(` `)` `,` | the matching key |
 | Return | ENTER |
 | Delete | DEL |
-| Escape | CLEAR |
+| Escape | leaves the magnifier, else CLEAR |
 | ↑ ↓ ← → | arrow pad |
 | F1–F5 | Y=, WINDOW, ZOOM, TRACE, GRAPH |
 | Shift (held) | 2ND |
@@ -73,7 +101,10 @@ on a laptop and on a large monitor.
 | Tab / ` | 2ND / ALPHA as taps |
 | A–Z, space | ALPHA + that key, sent automatically |
 
-Mouse clicks on the skin press whatever key the keymap says is under the pointer.
+Mouse clicks on the skin press whatever key the keymap says is under the pointer
+(on release — see the magnifier above). Clicks in the detached LCD window do
+nothing, but it takes the keyboard, so you can type into the calculator while
+looking only at the big screen.
 
 ## Headless driver
 
@@ -81,10 +112,16 @@ Mouse clicks on the skin press whatever key the keymap says is under the pointer
 ./headless "~/Documents/WabbitEmu/TI-84 Plus.rom" --secs 1 --keys "ON,CLEAR,2,+,3,ENTER" --after 1.5
 ./headless ROM --keys ON --pgm screen.pgm --quiet      # 96x64 greyscale dump
 ./ti84mac --render out.png 560 1 0 "ON,CLEAR,MATH"     # full skin render, no window
+./ti84mac --render lcd.png 768 1 1 "ON,2,+,3,ENTER"    # LCD only (what the detached window draws)
+TI84_MAG=0.5,0.45 ./ti84mac --render mag.png 500 1 0   # what the 4x magnifier shows
 ```
 
 `--render` draws through exactly the same code the window uses, which is how the
 app is checked without a display.
+
+`TI84_MAG="fx,fy"` (fractions of the window, 0..1) renders through the same
+magnifier transform the window uses, so the zoom can be checked without a display
+too.
 
 `TI84_WATCH=1` prints a status line 4x/second; `TI84_HIST=1` prints a PC and port
 histogram (how the boot problems in this emulator were found).
@@ -122,3 +159,11 @@ in a ROM image or a saved state run; there is no way to load a new one yet.
 
 Boots OS 2.55MP from a real 1 MB TI-84 Plus dump, RAM-clear splash, home screen,
 arithmetic, menus and greyscale all work; state save/restore round-trips.
+
+Checked in the running app: mouse clicks on the skin type the right keys, the
+click-and-hold magnifier toggles and stays centred on the pointer without typing
+the key it was held on, the detached LCD mirrors the skin's screen live, and it
+reopens with the app. Escape is the one path not exercised end to end — macOS
+automation would not deliver a synthetic Escape to the app at all (confirmed: no
+`keyDown` arrives), so that one is code-checked only; it matches on both the
+character and key code 53.

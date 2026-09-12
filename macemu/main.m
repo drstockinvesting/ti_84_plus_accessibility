@@ -4,6 +4,10 @@
  * (0, group*16, bit*16), LCD area = pure red), so the accessible skin built in
  * ../ works here unchanged. Unlike WabbitEmu the window has no half-the-skin
  * minimum size, so it scales down to fit a laptop screen and up for magnification.
+ *
+ * Two accessibility features beyond WabbitEmu's:
+ *   - a click-and-hold magnifier (MAG_Z x, centred on the pointer);
+ *   - a detached LCD window that mirrors the calculator's screen at any size.
  */
 #import <Cocoa/Cocoa.h>
 #import <ImageIO/ImageIO.h>
@@ -30,15 +34,26 @@ static int rom_loaded = 0;
 
 typedef struct { int g, b, frames; } queued_key_t;
 
+/* click-and-hold magnifier */
+#define MAG_Z       4.0                   /* magnification factor */
+#define MAG_HOLD    0.55                  /* seconds a press must be held to toggle it */
+#define MAG_SLOP    14.0                  /* points of drift still counted as "held still" */
+#define KEY_FRAMES  6                     /* how long a clicked key is held down (frames) */
+
 @interface TIView : NSView
 @property (nonatomic) CGImageRef skin;
 @property (nonatomic) int themeIndex;
-@property (nonatomic) BOOL screenOnly;
+@property (nonatomic) BOOL screenOnly;    /* YES in the detached LCD window */
+@property (nonatomic) BOOL magnify;
+- (void)setMagnify:(BOOL)on;
 @end
 
 @interface AppDelegate : NSObject <NSApplicationDelegate, NSWindowDelegate>
 @property (nonatomic, strong) NSWindow *window;
 @property (nonatomic, strong) TIView *view;
+@property (nonatomic, strong) NSWindow *lcdWindow;
+@property (nonatomic, strong) TIView *lcdView;
+- (void)magnifierChanged:(BOOL)on;
 @end
 
 static void drawCalc(CGContextRef ctx, CGRect b, CGImageRef skin, int themeIndex, BOOL screenOnly);
@@ -172,14 +187,15 @@ static void pumpKeyQueue(void) {
 /* ---------------- view ---------------- */
 
 @implementation TIView {
-    uint8_t _gray[LCD_W * LCD_H];
-    uint8_t _rgba[LCD_W * LCD_H * 4];
-    int _mouse_g, _mouse_b;
+    int _pend_g, _pend_b;          /* key under the press; sent only if it stays a short click */
+    NSTimer *_holdTimer;
+    NSPoint _pressPoint;
+    NSPoint _magCenter;            /* view point the magnifier is centred on */
 }
 
 - (instancetype)initWithFrame:(NSRect)f {
     self = [super initWithFrame:f];
-    _mouse_g = _mouse_b = -1;
+    _pend_g = _pend_b = -1;
     _themeIndex = 0;
     return self;
 }
@@ -200,11 +216,35 @@ static CGRect lcdRect(CGRect b, BOOL screenOnly) {
 }
 
 
+/* Apple's pointer-centred zoom mapping. With origin = c * (1 - 1/Z) the source
+ * point under the pointer is exactly c, the whole view stays reachable as the
+ * pointer sweeps across it, and the magnified rect never leaves the bounds.
+ * Because the point under the pointer is unchanged, hit testing needs no inverse. */
+static void applyMagnifier(CGContextRef ctx, CGRect b, NSPoint c) {
+    double k = 1.0 - 1.0 / MAG_Z;
+    c.x = fmax(0, fmin(b.size.width, c.x));
+    c.y = fmax(0, fmin(b.size.height, c.y));
+    CGContextClipToRect(ctx, b);
+    CGContextScaleCTM(ctx, MAG_Z, MAG_Z);
+    CGContextTranslateCTM(ctx, -c.x * k, -c.y * k);
+}
+
 - (void)drawRect:(NSRect)dirty {
     (void)dirty;
     CGContextRef ctx = [[NSGraphicsContext currentContext] CGContext];
+    if (_magnify) {
+        CGContextSaveGState(ctx);
+        applyMagnifier(ctx, self.bounds, _magCenter);
+    }
     drawCalc(ctx, self.bounds, self.skin, self.themeIndex, self.screenOnly);
-    if (!rom_loaded) {
+    if (_magnify) {
+        CGContextRestoreGState(ctx);
+        /* a high-contrast frame, so it is never a mystery that the view is zoomed */
+        CGContextSetRGBStrokeColor(ctx, 1.0, 0.78, 0.0, 1.0);
+        CGContextSetLineWidth(ctx, 4);
+        CGContextStrokeRect(ctx, CGRectInset(self.bounds, 2, 2));
+    }
+    if (!rom_loaded && !self.screenOnly) {
         NSDictionary *at = @{ NSForegroundColorAttributeName: NSColor.redColor,
                               NSFontAttributeName: [NSFont systemFontOfSize:16] };
         [@"No ROM loaded - File > Open ROM..." drawAtPoint:NSMakePoint(20, 20) withAttributes:at];
@@ -219,30 +259,74 @@ static CGRect lcdRect(CGRect b, BOOL screenOnly) {
     *ky = (int)((b.size.height - p.y) / b.size.height * km_h);
 }
 
+/* mouse-moved events so the magnifier can follow the pointer with no button down */
+- (void)updateTrackingAreas {
+    [super updateTrackingAreas];
+    for (NSTrackingArea *a in [self.trackingAreas copy]) [self removeTrackingArea:a];
+    [self addTrackingArea:[[NSTrackingArea alloc] initWithRect:self.bounds
+        options:(NSTrackingMouseMoved | NSTrackingActiveInKeyWindow | NSTrackingInVisibleRect)
+        owner:self userInfo:nil]];
+}
+
+- (void)setMagnify:(BOOL)on {
+    if (_magnify == on) return;
+    _magnify = on;
+    if (on) _magCenter = [self convertPoint:[self.window mouseLocationOutsideOfEventStream] fromView:nil];
+    [gApp magnifierChanged:on];
+    [self setNeedsDisplay:YES];
+}
+
+- (void)cancelHold {
+    [_holdTimer invalidate];
+    _holdTimer = nil;
+}
+
+- (void)holdFired:(NSTimer *)t {
+    (void)t;
+    _holdTimer = nil;
+    _pend_g = _pend_b = -1;            /* a hold never types: it only toggles the magnifier */
+    self.magnify = !self.magnify;
+    if (self.magnify) _magCenter = _pressPoint;
+    [self setNeedsDisplay:YES];
+}
+
 - (void)mouseDown:(NSEvent *)e {
-    if (self.screenOnly) return;
     NSPoint p = [self convertPoint:e.locationInWindow fromView:nil];
-    int kx, ky, g, b;
-    [self pointToKeymap:p x:&kx y:&ky];
-    if (keyAtKeymapPixel(kx, ky, &g, &b)) {
-        _mouse_g = g; _mouse_b = b;
-        calc_key(&calc, g, b, 1);
-        [self setNeedsDisplay:YES];
+    _pressPoint = p;
+    _pend_g = _pend_b = -1;
+    if (!self.screenOnly) {
+        int kx, ky, g, b;
+        [self pointToKeymap:p x:&kx y:&ky];
+        if (keyAtKeymapPixel(kx, ky, &g, &b)) { _pend_g = g; _pend_b = b; }
+        [self cancelHold];
+        _holdTimer = [NSTimer scheduledTimerWithTimeInterval:MAG_HOLD target:self
+                              selector:@selector(holdFired:) userInfo:nil repeats:NO];
     }
+    if (_magnify) { _magCenter = p; [self setNeedsDisplay:YES]; }
 }
+
 - (void)mouseDragged:(NSEvent *)e {
-    if (_mouse_g < 0) return;
     NSPoint p = [self convertPoint:e.locationInWindow fromView:nil];
-    int kx, ky, g, b;
-    [self pointToKeymap:p x:&kx y:&ky];
-    if (!keyAtKeymapPixel(kx, ky, &g, &b) || g != _mouse_g || b != _mouse_b) {
-        calc_key(&calc, _mouse_g, _mouse_b, 0);
-        _mouse_g = _mouse_b = -1;
+    if (fabs(p.x - _pressPoint.x) > MAG_SLOP || fabs(p.y - _pressPoint.y) > MAG_SLOP) {
+        [self cancelHold];             /* a drag is not a hold */
+        _pend_g = _pend_b = -1;
     }
+    if (_magnify) { _magCenter = p; [self setNeedsDisplay:YES]; }
 }
+
 - (void)mouseUp:(NSEvent *)e {
-    if (_mouse_g >= 0) calc_key(&calc, _mouse_g, _mouse_b, 0);
-    _mouse_g = _mouse_b = -1;
+    (void)e;
+    if (_holdTimer) {                  /* released in time: it was a click, so type the key */
+        [self cancelHold];
+        if (_pend_g >= 0) enqueueKey(_pend_g, _pend_b, KEY_FRAMES);
+    }
+    _pend_g = _pend_b = -1;
+}
+
+- (void)mouseMoved:(NSEvent *)e {
+    if (!_magnify) return;
+    _magCenter = [self convertPoint:e.locationInWindow fromView:nil];
+    [self setNeedsDisplay:YES];
 }
 
 /* ---- keyboard ---- */
@@ -292,6 +376,7 @@ static const tikey_t *mapCharacter(unichar ch) {
     if (!s.length) return;
     unichar ch = [s characterAtIndex:0];
 
+    if ((ch == 27 || e.keyCode == 53) && _magnify) { self.magnify = NO; return; }   /* esc leaves the magnifier first */
     if (ch >= 'a' && ch <= 'z') ch = (unichar)(ch - 'a' + 'A');
     if (ch >= 'A' && ch <= 'Z') {                             /* letters go through ALPHA */
         const tikey_t *k = keyForAlpha((char)ch);
@@ -366,7 +451,8 @@ static void drawCalc(CGContextRef ctx, CGRect b, CGImageRef skin, int themeIndex
     gRomPath = rom;
     if (calc_init(&calc, rom.fileSystemRepresentation) == 0) {
         rom_loaded = 1;
-        self.window.title = [NSString stringWithFormat:@"TI-84 Plus — %@", rom.lastPathComponent];
+        if (!self.view.magnify)
+            self.window.title = [NSString stringWithFormat:@"TI-84 Plus — %@", rom.lastPathComponent];
         [[NSUserDefaults standardUserDefaults] setObject:rom forKey:@"romPath"];
         if (calc_load_state(&calc, statePath().fileSystemRepresentation) != 0)
             NSLog(@"starting from a cold reset (no usable saved state)");
@@ -414,6 +500,7 @@ static void drawCalc(CGContextRef ctx, CGRect b, CGImageRef skin, int themeIndex
     self.window.delegate = self;
     self.window.contentMinSize = NSMakeSize(160, 160 / aspect);
     self.window.contentAspectRatio = NSMakeSize(km_w, km_h);
+    self.window.acceptsMouseMovedEvents = YES;        /* the magnifier follows the pointer */
     [self.window setFrameAutosaveName:@"TI84Window"];
 
     self.view = [[TIView alloc] initWithFrame:NSMakeRect(0, 0, w, h)];
@@ -424,6 +511,7 @@ static void drawCalc(CGContextRef ctx, CGRect b, CGImageRef skin, int themeIndex
     [self.window makeKeyAndOrderFront:nil];
 
     [self setTheme:[d integerForKey:@"theme"]];
+    if ([d boolForKey:@"lcdDetached"]) [self showDetachedLCD:YES];
 
     NSString *rom = defaultsPath(@"romPath",
         [home stringByAppendingPathComponent:@"Documents/WabbitEmu/TI-84 Plus.rom"]);
@@ -447,11 +535,13 @@ static void drawCalc(CGContextRef ctx, CGRect b, CGImageRef skin, int themeIndex
         calc_frame(&calc);
     }
     [self.view setNeedsDisplay:YES];
+    [self.lcdView setNeedsDisplay:YES];
 }
 
 - (void)setTheme:(NSInteger)i {
     if (i < 0 || i >= NTHEMES) i = 0;
     self.view.themeIndex = (int)i;
+    self.lcdView.themeIndex = (int)i;
     NSString *path = [NSUserDefaults.standardUserDefaults stringForKey:
                       [NSString stringWithUTF8String:THEMES[i].skin_key]];
     CGImageRef img = loadImage(path);
@@ -461,26 +551,86 @@ static void drawCalc(CGContextRef ctx, CGRect b, CGImageRef skin, int themeIndex
     }
     [NSUserDefaults.standardUserDefaults setInteger:i forKey:@"theme"];
     [self.view setNeedsDisplay:YES];
+    [self.lcdView setNeedsDisplay:YES];
     for (NSMenuItem *m in [[[NSApp mainMenu] itemWithTitle:@"View"] submenu].itemArray)
         if (m.tag >= 100 && m.tag < 100 + NTHEMES) m.state = (m.tag - 100 == i) ? NSControlStateValueOn : NSControlStateValueOff;
+}
+
+/* find a View-menu item by tag, so checkmarks stay right however the state changed */
+static NSMenuItem *viewMenuItem(int tag) {
+    for (NSMenuItem *m in [[[NSApp mainMenu] itemWithTitle:@"View"] submenu].itemArray)
+        if (m.tag == tag) return m;
+    return nil;
 }
 
 /* ---- menu actions ---- */
 
 - (void)chooseTheme:(NSMenuItem *)sender { [self setTheme:sender.tag - 100]; }
 
-- (void)toggleScreenOnly:(NSMenuItem *)sender {
-    BOOL on = !self.view.screenOnly;
-    self.view.screenOnly = on;
-    sender.state = on ? NSControlStateValueOn : NSControlStateValueOff;
-    if (on) {
-        self.window.contentAspectRatio = NSMakeSize(LCD_W, LCD_H);
-        self.window.contentMinSize = NSMakeSize(192, 128);
-    } else {
-        self.window.contentAspectRatio = NSMakeSize(km_w, km_h);
-        self.window.contentMinSize = NSMakeSize(160, 160.0 * km_h / km_w);
+/* ---- detached LCD ----
+ * A second window showing nothing but the calculator's screen, mirroring the one
+ * on the skin (both are drawn from the same emulator state every frame). It is
+ * freely resizable and keeps the LCD's 3:2 shape so the pixels stay square, and
+ * it is drawn with nearest-neighbour sampling so they stay crisp at any size. */
+- (void)showDetachedLCD:(BOOL)on {
+    if (on && !self.lcdWindow) {
+        NSRect f = NSMakeRect(0, 0, LCD_W * 8, LCD_H * 8);
+        self.lcdWindow = [[NSWindow alloc] initWithContentRect:f
+            styleMask:(NSWindowStyleMaskTitled | NSWindowStyleMaskClosable |
+                       NSWindowStyleMaskMiniaturizable | NSWindowStyleMaskResizable)
+            backing:NSBackingStoreBuffered defer:NO];
+        self.lcdWindow.title = @"TI-84 Plus — LCD";
+        self.lcdWindow.delegate = self;
+        self.lcdWindow.contentAspectRatio = NSMakeSize(LCD_W, LCD_H);
+        self.lcdWindow.contentMinSize = NSMakeSize(LCD_W * 2, LCD_H * 2);
+        self.lcdWindow.releasedWhenClosed = NO;
+        self.lcdView = [[TIView alloc] initWithFrame:f];
+        self.lcdView.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
+        self.lcdView.screenOnly = YES;
+        self.lcdView.themeIndex = self.view.themeIndex;
+        self.lcdWindow.contentView = self.lcdView;
+        [self.lcdWindow setFrameAutosaveName:@"TI84LCDWindow"];
+        [self.lcdWindow cascadeTopLeftFromPoint:NSMakePoint(NSMaxX(self.window.frame) + 20,
+                                                            NSMaxY(self.window.frame))];
+        [self.lcdWindow makeKeyAndOrderFront:nil];
+        [self.lcdWindow makeFirstResponder:self.lcdView];
+    } else if (on) {
+        [self.lcdWindow makeKeyAndOrderFront:nil];
+    } else if (self.lcdWindow) {
+        NSWindow *w = self.lcdWindow;
+        self.lcdWindow = nil;                        /* so windowWillClose: is a no-op */
+        self.lcdView = nil;
+        [w close];
     }
-    [self.view setNeedsDisplay:YES];
+    viewMenuItem(200).state = on ? NSControlStateValueOn : NSControlStateValueOff;
+    [NSUserDefaults.standardUserDefaults setBool:on forKey:@"lcdDetached"];
+}
+
+- (void)toggleDetachedLCD:(id)sender {
+    (void)sender;
+    [self showDetachedLCD:self.lcdWindow == nil];
+}
+
+- (void)toggleMagnifier:(id)sender {
+    (void)sender;
+    self.view.magnify = !self.view.magnify;
+}
+
+- (void)magnifierChanged:(BOOL)on {
+    viewMenuItem(201).state = on ? NSControlStateValueOn : NSControlStateValueOff;
+    self.window.title = on ? [NSString stringWithFormat:@"TI-84 Plus — %.0f× magnifier", MAG_Z]
+                           : [NSString stringWithFormat:@"TI-84 Plus — %@", gRomPath.lastPathComponent];
+}
+
+- (void)windowWillClose:(NSNotification *)n {
+    if (n.object == self.lcdWindow) {
+        self.lcdWindow = nil;
+        self.lcdView = nil;
+        viewMenuItem(200).state = NSControlStateValueOff;
+        [NSUserDefaults.standardUserDefaults setBool:NO forKey:@"lcdDetached"];
+    } else if (n.object == self.window) {
+        [self.lcdWindow close];                      /* the LCD never outlives the calculator */
+    }
 }
 
 - (void)openRom:(id)sender {
@@ -503,20 +653,37 @@ static void drawCalc(CGContextRef ctx, CGRect b, CGImageRef skin, int themeIndex
 - (void)contrastUp:(id)sender { enqueueNamed("2ND", 3); enqueueNamed("UP", 3); }
 - (void)contrastDown:(id)sender { enqueueNamed("2ND", 3); enqueueNamed("DOWN", 3); }
 
-- (void)actualSize:(id)sender {
-    NSRect f = self.window.frame;
-    NSSize content = NSMakeSize(km_w, km_h);
-    NSRect r = [self.window frameRectForContentRect:NSMakeRect(f.origin.x, f.origin.y, content.width, content.height)];
-    [self.window setFrame:r display:YES animate:YES];
+/* Actual Size and Fit to Screen act on whichever window is in front. */
+- (NSWindow *)sizingTarget {
+    return (NSApp.keyWindow == self.lcdWindow && self.lcdWindow) ? self.lcdWindow : self.window;
 }
+
+- (void)actualSize:(id)sender {
+    (void)sender;
+    NSWindow *w = [self sizingTarget];
+    NSSize content;
+    if (w == self.lcdWindow) {                       /* snap to a whole-pixel LCD scale */
+        double sc = round(w.contentView.bounds.size.width / LCD_W);
+        if (sc < 2) sc = 2;
+        content = NSMakeSize(LCD_W * sc, LCD_H * sc);
+    } else {
+        content = NSMakeSize(km_w, km_h);            /* the skin's own pixels */
+    }
+    NSRect f = w.frame;
+    [w setFrame:[w frameRectForContentRect:NSMakeRect(f.origin.x, f.origin.y, content.width, content.height)]
+        display:YES animate:YES];
+}
+
 - (void)fitScreen:(id)sender {
-    NSRect vis = self.window.screen.visibleFrame;
-    double aspect = self.view.screenOnly ? (double)LCD_W / LCD_H : (double)km_w / km_h;
-    double h = vis.size.height, w = h * aspect;
-    if (w > vis.size.width) { w = vis.size.width; h = w / aspect; }
-    NSRect r = [self.window frameRectForContentRect:NSMakeRect(vis.origin.x, vis.origin.y, w, h)];
+    (void)sender;
+    NSWindow *w = [self sizingTarget];
+    NSRect vis = w.screen.visibleFrame;
+    double aspect = (w == self.lcdWindow) ? (double)LCD_W / LCD_H : (double)km_w / km_h;
+    double h = vis.size.height, ww = h * aspect;
+    if (ww > vis.size.width) { ww = vis.size.width; h = ww / aspect; }
+    NSRect r = [w frameRectForContentRect:NSMakeRect(vis.origin.x, vis.origin.y, ww, h)];
     r.size.height = fmin(r.size.height, vis.size.height);
-    [self.window setFrame:r display:YES animate:YES];
+    [w setFrame:r display:YES animate:YES];
 }
 
 - (void)applicationWillTerminate:(NSNotification *)n {
@@ -562,7 +729,9 @@ static void buildMenu(void) {
         m.tag = 100 + i;
     }
     [view addItem:[NSMenuItem separatorItem]];
-    item(view, @"Screen Only (big screen)", @selector(toggleScreenOnly:), @"0");
+    item(view, @"Detached LCD Screen", @selector(toggleDetachedLCD:), @"0").tag = 200;
+    item(view, @"Magnifier (4×)", @selector(toggleMagnifier:), @"z").tag = 201;
+    [view addItem:[NSMenuItem separatorItem]];
     item(view, @"Actual Size", @selector(actualSize:), @"=");
     item(view, @"Fit to Screen", @selector(fitScreen:), @"f");
     viewItem.submenu = view;
@@ -621,7 +790,15 @@ static int renderToPNG(const char *out, int width, int theme, int screenOnly, co
     CGColorSpaceRef cs = CGColorSpaceCreateDeviceRGB();
     CGContextRef ctx = CGBitmapContextCreate(NULL, width, height, 8, 0, cs,
                                              (CGBitmapInfo)kCGImageAlphaPremultipliedLast);
-    drawCalc(ctx, CGRectMake(0, 0, width, height), skin, theme, screenOnly);
+    CGRect rb = CGRectMake(0, 0, width, height);
+    const char *mag = getenv("TI84_MAG");      /* "fx,fy" in 0..1 — render what the magnifier shows */
+    if (mag) {
+        double fx = 0.5, fy = 0.5;
+        sscanf(mag, "%lf,%lf", &fx, &fy);
+        applyMagnifier(ctx, rb, NSMakePoint(fx * width, fy * height));
+        fprintf(stderr, "magnifier %.0fx at (%.2f, %.2f)\n", MAG_Z, fx, fy);
+    }
+    drawCalc(ctx, rb, skin, theme, screenOnly);
     CGImageRef img = CGBitmapContextCreateImage(ctx);
     CFURLRef url = (__bridge CFURLRef)[NSURL fileURLWithPath:[NSString stringWithUTF8String:out]];
     CGImageDestinationRef dst = CGImageDestinationCreateWithURL(url, (__bridge CFStringRef)@"public.png", 1, NULL);
