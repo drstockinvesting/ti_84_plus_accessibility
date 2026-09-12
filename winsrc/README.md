@@ -4,8 +4,8 @@
 WabbitEmu itself, and moves the Day / Night / Amber LCD colors out of the
 byte-patched binary and into the source.
 
-It applies cleanly to `sputt/wabbitemu` at `master`, touches **four files**, and
-is +287 / −48 lines. It adds no new files, no new resources and no new menu
+It applies cleanly to `sputt/wabbitemu` at `master`, touches **five files**, and
+is +383 / −51 lines. It adds no new files, no new resources and no new menu
 items, which is deliberate: `resource.h` and `Wabbitemu.rc` are where an
 untested build breaks, so the patch stays out of them.
 
@@ -16,7 +16,8 @@ untested build breaks, so the patch stays out of them.
 | `gui/gui.h` | magnifier constants; five fields on `MainWindow_t` |
 | `gui/gui.c` | the magnifier itself: paint transform, hold gesture, deferred keypress |
 | `gui/guilcd.c` | `lcd_theme` palette; forwards mouse-move to the frame |
-| `gui/registry.c` | one row: the `lcd_theme` setting, default 0 (stock green) |
+| `gui/registry.c` | the `lcd_theme` setting, and the command-line flavour override |
+| `gui/registry.h` | three declarations for that override |
 
 ### 1. Click-and-hold magnifier (4×)
 
@@ -86,22 +87,44 @@ If `git apply` complains, use `patch -p1 < accessible-wabbitemu.patch`.
 
 ## Deploying the three flavours
 
-Portable mode reads `Wabbitemu.ini` from the **current directory**, so one exe
-covers all three — but how you lay it out decides whether the flavours share a
-calculator state:
+One exe, **one folder, one `Wabbitemu.ini`, three shortcuts** — so all three
+flavours go on sharing a single saved calculator, exactly as the three patched
+exes did. WabbitEmu derives the auto-save from the folder, not from the INI,
+which is what makes this work.
 
-* **One folder per flavour** (INIs in `ini/` here): each gets its own
-  `Wabbitemu.ini`, so each remembers its own skin and theme — but WabbitEmu
-  derives the auto-save from the folder, so **each flavour gets a separate
-  saved calculator**. Switching Day→Night loses your place.
-* **One shared folder**, which is what the current bundle does, keeps a single
-  auto-save. That needs three differently-named INIs in one folder, which
-  portable mode does not support — it is the reason the old build patched the
-  INI name into each exe.
+The flavour comes from the command line:
 
-I have not picked one. The second preserves today's behaviour and needs a small
-extra change to the source (reading the INI name from the command line); the
-first works with this patch as-is. Worth deciding before the build.
+```
+Wabbitemu.exe -theme day   -skin TI-84Plus-Day.png
+Wabbitemu.exe -theme night -skin TI-84Plus-Night.png
+Wabbitemu.exe -theme amber -skin TI-84Plus-Night.png
+```
+
+`-theme` takes `green`, `day`, `night` or `amber` (or `0`–`3`). `-skin` and
+`-keymap` take paths. Anything not given falls back to `Wabbitemu.ini`.
+
+**The override is never written back on exit.** That is the point: the three
+shortcuts share one INI, so without this the last window closed would redefine
+the skin and theme for the other two. `SaveRegistrySettings` skips `skin_path`
+and `keymap_path` whenever they came from the command line, and `lcd_theme` is
+only ever read.
+
+### Making the shortcuts
+
+Put `Wabbitemu.ini` (in this folder) beside the exe together with the ROM, the
+two skin PNGs and the keymap. Then, for each flavour: right-click the exe →
+**Send to ▸ Desktop (create shortcut)**, then right-click the shortcut →
+**Properties**, and append the arguments to **Target**, after the closing quote:
+
+```
+"C:\...\Wabbitemu.exe" -theme night -skin TI-84Plus-Night.png
+```
+
+Name them "TI-84 Day", "TI-84 Night", "TI-84 Amber". Leave **Start in** alone —
+it must stay the folder holding the exe, or portable mode will not find the INI
+and the shared save.
+
+Amber deliberately uses the Night skin; only the LCD palette differs.
 
 ## Not verified
 
@@ -116,3 +139,7 @@ The two most likely places, in order:
 2. The `WM_MOUSEMOVE` forwarding in `LCDProc` is a convenience — it stops the
    zoom freezing when the pointer crosses the screen. If it misbehaves, delete
    that hunk; everything else keeps working.
+3. The override reads `__argc` / `__targv`, the MSVC CRT's argument globals,
+   which is what lets one code path serve both Unicode and ANSI builds. They
+   are populated for `WinMain` — but if the arguments come back empty, that is
+   the first thing to check.

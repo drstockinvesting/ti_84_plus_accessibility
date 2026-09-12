@@ -360,10 +360,11 @@
  #include "guibuttons.h"
  #include "calc.h"
  #include "sound.h"
-@@ -33,6 +34,38 @@
+@@ -32,6 +33,36 @@
+ BITMAPINFO *bi = NULL;
  BITMAPINFO *contrastbi = NULL;
  BITMAPINFO *colorbi = NULL;
- 
++
 +/* --- accessibility LCD themes ----------------------------------------------
 + * lcd_theme in the settings picks the black-and-white LCD palette:
 + *   0 original green   1 day (black on white)
@@ -374,10 +375,8 @@
 +static int LCDThemeIndex(void) {
 +	static int theme = -1;
 +	if (theme < 0) {
-+		theme = (int) QueryWabbitKey(_T("lcd_theme"));
-+		if (theme < 0 || theme > 3) {
-+			theme = 0;
-+		}
++		/* GetLCDTheme honours "-theme night" before falling back to the INI */
++		theme = GetLCDTheme();
 +	}
 +	return theme;
 +}
@@ -395,11 +394,10 @@
 +		on[i] = ramps[theme][i + 3];
 +	}
 +}
-+
+ 
  HDC DrawDragPanes(HWND hwnd, HDC hdcDest, LPMAINWINDOW lpMainWindow) {
  	if (!lpMainWindow->is_calc_file) {
- 		return NULL;
-@@ -347,10 +380,13 @@
+@@ -347,10 +378,13 @@
  				bi->bmiHeader.biClrImportant = MAX_SHADES+1;
  
  #define LCD_HIGH	255
@@ -416,7 +414,7 @@
  				}
  			}
  
-@@ -368,10 +404,20 @@
+@@ -368,10 +402,20 @@
  				contrastbi->bmiHeader.biClrUsed = MAX_SHADES + 1;
  				contrastbi->bmiHeader.biClrImportant = MAX_SHADES + 1;
  
@@ -440,7 +438,7 @@
  				}
  			}
  
-@@ -465,6 +511,19 @@
+@@ -465,6 +509,19 @@
  			return 0;
  		}
  		case WM_MOUSEMOVE: {		
@@ -460,6 +458,21 @@
  			if (wParam != MK_LBUTTON) {
  				lpMainWindow->dwDragCountdown = 0;
  			} else if (gif_write_state == GIF_IDLE) {
+--- a/gui/registry.h
++++ b/gui/registry.h
+@@ -7,6 +7,12 @@
+ HRESULT LoadRegistryDefaults();
+ HRESULT SaveRegistrySettings(const LPMAINWINDOW lpMainWindow, const LPCALC lpCalc);
+ INT_PTR QueryWabbitKey(LPCTSTR lpszName);
++
++/* --- accessibility: command-line flavour override ---
++ * NULL from the skin/keymap accessors means "not overridden". */
++int GetLCDTheme(void);
++LPCTSTR GetSkinOverride(void);
++LPCTSTR GetKeymapOverride(void);
+ void SaveWabbitKey(TCHAR *name, int type, void *value);
+ //void SaveWabbitKeyA(char *name, int type, void *value);
+ //void SaveWabbitKeyW(WCHAR *name, int type, void *value);
 --- a/gui/registry.c
 +++ b/gui/registry.c
 @@ -36,6 +36,7 @@
@@ -470,3 +483,118 @@
  	{_T("lcd_mode"),				REG_DWORD,	0},		// perfect gray
  	{_T("lcd_freq"),				REG_DWORD,	FPS},	// steady freq
  	{_T("screen_scale"),			REG_DWORD,  2},
+@@ -171,7 +172,81 @@
+ 	} else {
+ 		GetPrivateProfileString(name, lpszName, (LPTSTR)defValue->Value, result.szResult, ARRAYSIZE(result.szResult), portSettingsPath);
+ 		return (defValue->dwType == REG_SZ) ? (LONG_PTR)result.szResult : result.dwResult;
++	}
++}
++
++/* --- accessibility: command-line flavour override --------------------------
++ * Day / Night / Amber used to be three separate exes so that one folder could
++ * hold all three: WabbitEmu derives the auto-save from the folder, not from
++ * the INI, so sharing a folder is what lets the flavours share one saved
++ * calculator. Building from source turns that into a command line instead:
++ *
++ *     Wabbitemu.exe -theme night -skin TI-84Plus-Night.png
++ *
++ * -theme takes green|day|night|amber (or 0..3). The override is applied after
++ * the settings are read and is deliberately never written back on exit, so
++ * three shortcuts share one Wabbitemu.ini - and therefore one calculator -
++ * without the last one closed redefining the flavour for the other two.
++ * ------------------------------------------------------------------------- */
++static BOOL g_bCmdLineParsed = FALSE;
++static int g_nThemeOverride = -1;
++static TCHAR g_szSkinOverride[256] = { 0 };
++static TCHAR g_szKeymapOverride[256] = { 0 };
++
++static int ParseThemeName(LPCTSTR lpszName) {
++	if (_tcsicmp(lpszName, _T("green")) == 0 || _tcsicmp(lpszName, _T("original")) == 0) {
++		return 0;
++	} else if (_tcsicmp(lpszName, _T("day")) == 0) {
++		return 1;
++	} else if (_tcsicmp(lpszName, _T("night")) == 0) {
++		return 2;
++	} else if (_tcsicmp(lpszName, _T("amber")) == 0 || _tcsicmp(lpszName, _T("night-amber")) == 0) {
++		return 3;
++	}
++	return _ttoi(lpszName);		/* 0..3 also accepted */
++}
++
++/* Parsed on first use, so nothing has to call this in the right order. */
++static void EnsureCmdLineParsed(void) {
++	if (g_bCmdLineParsed) {
++		return;
++	}
++	g_bCmdLineParsed = TRUE;
++
++	for (int i = 1; i < __argc; i++) {
++		if (i + 1 >= __argc) {
++			break;
++		}
++		if (_tcsicmp(__targv[i], _T("-theme")) == 0) {
++			int theme = ParseThemeName(__targv[++i]);
++			if (theme >= 0 && theme <= 3) {
++				g_nThemeOverride = theme;
++			}
++		} else if (_tcsicmp(__targv[i], _T("-skin")) == 0) {
++			StringCbCopy(g_szSkinOverride, sizeof(g_szSkinOverride), __targv[++i]);
++		} else if (_tcsicmp(__targv[i], _T("-keymap")) == 0) {
++			StringCbCopy(g_szKeymapOverride, sizeof(g_szKeymapOverride), __targv[++i]);
++		}
+ 	}
++}
++
++int GetLCDTheme(void) {
++	EnsureCmdLineParsed();
++	if (g_nThemeOverride >= 0) {
++		return g_nThemeOverride;
++	}
++	int theme = (int) QueryWabbitKey(_T("lcd_theme"));
++	return (theme >= 0 && theme <= 3) ? theme : 0;
++}
++
++LPCTSTR GetSkinOverride(void) {
++	EnsureCmdLineParsed();
++	return g_szSkinOverride[0] ? g_szSkinOverride : NULL;
++}
++
++LPCTSTR GetKeymapOverride(void) {
++	EnsureCmdLineParsed();
++	return g_szKeymapOverride[0] ? g_szKeymapOverride : NULL;
+ }
+ 
+ INT_PTR QueryWabbitKey(LPCTSTR lpszName) {
+@@ -304,6 +379,14 @@
+ 	StringCbCopy(lpCalc->rom_path, sizeof(lpCalc->rom_path), (TCHAR *) QueryWabbitKey(_T("rom_path")));
+ 	StringCbCopy(lpMainWindow->skin_path, sizeof(lpMainWindow->skin_path), (TCHAR *)QueryWabbitKey(_T("skin_path")));
+ 	StringCbCopy(lpMainWindow->keymap_path, sizeof(lpMainWindow->keymap_path), (TCHAR *)QueryWabbitKey(_T("keymap_path")));
++
++	/* a flavour named on the command line wins over the shared INI */
++	if (GetSkinOverride() != NULL) {
++		StringCbCopy(lpMainWindow->skin_path, sizeof(lpMainWindow->skin_path), GetSkinOverride());
++	}
++	if (GetKeymapOverride() != NULL) {
++		StringCbCopy(lpMainWindow->keymap_path, sizeof(lpMainWindow->keymap_path), GetKeymapOverride());
++	}
+ 	lpMainWindow->bSkinEnabled = (BOOL)QueryWabbitKey(_T("skin"));
+ 	lpMainWindow->bCutout = (BOOL)QueryWabbitKey(_T("cutout"));
+ 	lpMainWindow->bAlphaBlendLCD = (BOOL)QueryWabbitKey(_T("alphablend_lcd"));
+@@ -431,8 +514,15 @@
+ 		SaveWabbitKey(_T("faceplate_color"), REG_DWORD, &lpMainWindow->m_FaceplateColor);
+ 		SaveWabbitKey(_T("custom_skin"), REG_DWORD, &lpMainWindow->bCustomSkin);
+ 		SaveWabbitKey(_T("use_faceplate_color_custom_skin"), REG_DWORD, &lpMainWindow->bUseCustomFaceplateColor);
+-		SaveWabbitKey(_T("skin_path"), REG_SZ, &lpMainWindow->skin_path);
+-		SaveWabbitKey(_T("keymap_path"), REG_SZ, &lpMainWindow->keymap_path);
++		/* An overridden flavour must not be written back: the three shortcuts
++		 * share one INI, so the last window closed would otherwise redefine
++		 * the skin for all of them. */
++		if (GetSkinOverride() == NULL) {
++			SaveWabbitKey(_T("skin_path"), REG_SZ, &lpMainWindow->skin_path);
++		}
++		if (GetKeymapOverride() == NULL) {
++			SaveWabbitKey(_T("keymap_path"), REG_SZ, &lpMainWindow->keymap_path);
++		}
+ 		WINDOWPLACEMENT wp;
+ 		GetWindowPlacement(lpMainWindow->hwndFrame, &wp);
+ 		SaveWabbitKey(_T("startX"), REG_DWORD, &wp.rcNormalPosition.left);
