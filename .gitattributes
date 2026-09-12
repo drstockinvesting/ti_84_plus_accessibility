@@ -1,2 +1,5 @@
 # Auto detect text files and perform LF normalization
 * text=auto
+
+# Windows instructions stay CRLF so Notepad shows them correctly
+*.txt text eol=crlf

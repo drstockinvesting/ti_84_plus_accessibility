@@ -1,0 +1,23 @@
+# Never commit calculator ROMs: they are TI's copyrighted software and must be
+# dumped from a calculator you own.
+*.rom
+*.sav
+*.8xu
+*.8xp
+
+# Patched emulator binaries are rebuilt by patch_lcd.py from your own copy.
+*.exe
+
+# Build products
+macemu/build/
+macemu/headless
+macemu/zextest
+macemu/ti84mac
+macemu/out/
+*.o
+
+# Local renders and scratch
+out/
+__pycache__/
+*.pyc
+.DS_Store

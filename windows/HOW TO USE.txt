@@ -1,0 +1,39 @@
+TI-84 ACCESSIBLE  -  WabbitEmu in Day and Night mode
+====================================================
+
+WHICH ONE TO OPEN
+  Wabbitemu-Day.exe          White screen, black text, normal calculator colours.
+  Wabbitemu-Night.exe        Black screen, white text, dark calculator. For low light.
+  Wabbitemu-NightYellow.exe  Same as Night but yellow text. Optional - try it if
+                             yellow is easier to read. (Uses the Night settings.)
+
+These are copies of Wabbitemu 1.9.5.22 with only the screen colours changed.
+The original Wabbitemu.exe is untouched in the folder above.
+
+FIRST-TIME SETUP (do this once, before storing anything on the calculator)
+  1. Keep every file in this folder together.
+  2. Double-click Wabbitemu-Day.exe. If Windows shows "Windows protected your PC",
+     click "More info", then "Run anyway". (The program is not signed - neither is
+     the original.) Then close it.
+  3. Double-click Wabbitemu-Night.exe, then close it.
+  After this, Day and Night share the same calculator memory (programs, lists,
+  stored values), which is saved automatically each time you close it.
+
+EVERY DAY
+  - Only one can be open at a time. Close one before opening the other.
+  - If the window opens taller than the screen, drag a TOP CORNER of the window.
+    Corners resize it; the edges do not.
+  - Screen shade uses the real calculator keys: press 2nd, then the up or down
+    arrow, one press at a time.
+      Day:   if the background looks light grey, press 2nd then DOWN until it is
+             pure white. If the text starts turning grey, press 2nd then UP once.
+      Night: 2nd then DOWN dims the text if it is too bright; 2nd then UP restores it.
+  - Leave "Alpha blend LCD" switched off in Options (it is off already); it turns
+    black text grey.
+  - Don't pick a different skin in Options for these copies - each one already has
+    its own skin set in its settings file (Wabbitemu.ini for Day, NightMode.ini
+    for Night).
+  - The saved calculator memory is a file named "TI-84 Accessiblewabbitemu.sav"
+    next to this folder. Don't delete it.
+
+For private accessibility use only.
