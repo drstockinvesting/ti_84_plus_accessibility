@@ -1,0 +1,472 @@
+--- a/gui/gui.h
++++ b/gui/gui.h
+@@ -12,6 +12,11 @@
+ extern int SKIN_WIDTH;
+ extern int SKIN_HEIGHT;
+ 
++/* --- accessibility: click-and-hold magnifier ---------------------------- */
++#define MAG_Z		4.0		/* magnification factor */
++#define MAG_HOLD	550		/* ms a press must be held to toggle it */
++#define MAG_SLOP	14		/* px of drift still counted as "held still" */
++
+ #define MIN_SKIN_WIDTH	290
+ #define MIN_SKIN_HEIGHT	600
+ 
+@@ -147,6 +152,14 @@
+ 	BOOL silent_mode;
+ 
+ 	BOOL bTIOSDebug;
++
++	/* --- accessibility: click-and-hold magnifier ---
++	 * ZeroMemory on the frame leaves all of this at "off". */
++	BOOL bMagnify;			/* TRUE while the view is zoomed */
++	POINT ptMagCenter;		/* client point the zoom is centred on */
++	POINT ptMagPress;		/* where the press that may become a hold started */
++	BOOL bMagPending;		/* a press is down and has not been ruled out yet */
++	RECT rcLCDUnmag;		/* where the LCD child sits when not zoomed */
+ } MainWindow_t, *LPMAINWINDOW;
+ 
+ HWND gui_debug_hwnd(LPMAINWINDOW lpMainWindow);
+--- a/gui/gui.c
++++ b/gui/gui.c
+@@ -60,6 +60,7 @@
+ #define GIFGRAD_PEAK 15
+ #define GIFGRAD_TROUGH 10
+ #define KEY_TIMER 1
++#define MAG_TIMER 0x4D41	/* hold detector for the magnifier */
+ #define MIN_KEY_DELAY 400
+ #define MENU_FILE 0
+ #define BOOTFREE_VER_MAJOR 11
+@@ -1246,6 +1247,82 @@
+ 	lpCalc->fake_running = FALSE;
+ }
+ 
++/* ---------------------------------------------------------------------------
++ * Accessibility: click-and-hold magnifier.
++ *
++ * Pointer-centred zoom. A client point p is displayed at
++ *     d = Z * (p - c*k),   k = 1 - 1/Z
++ * so the point under the pointer (p == c) is displayed exactly where it
++ * already was. Two consequences this relies on:
++ *   - hit testing needs no inverse transform. The centre follows the mouse, so
++ *     at the moment of a click p == c and the existing keymap lookup (which
++ *     just divides the client point by skin_scale) is still correct.
++ *   - the magnified image can never show anything from outside the window, and
++ *     sweeping the pointer still reaches every corner.
++ * ------------------------------------------------------------------------- */
++static void MagClampCenter(LPMAINWINDOW lpMainWindow) {
++	RECT rc;
++	GetClientRect(lpMainWindow->hwndFrame, &rc);
++	if (lpMainWindow->ptMagCenter.x < rc.left)		lpMainWindow->ptMagCenter.x = rc.left;
++	if (lpMainWindow->ptMagCenter.x > rc.right)		lpMainWindow->ptMagCenter.x = rc.right;
++	if (lpMainWindow->ptMagCenter.y < rc.top)		lpMainWindow->ptMagCenter.y = rc.top;
++	if (lpMainWindow->ptMagCenter.y > rc.bottom)	lpMainWindow->ptMagCenter.y = rc.bottom;
++}
++
++/* Remember where the LCD child sits while the view is not zoomed. */
++static void MagCaptureLCDRect(LPMAINWINDOW lpMainWindow) {
++	RECT r;
++	if (lpMainWindow->bMagnify || lpMainWindow->hwndLCD == NULL) {
++		return;
++	}
++	GetWindowRect(lpMainWindow->hwndLCD, &r);
++	MapWindowPoints(NULL, lpMainWindow->hwndFrame, (LPPOINT) &r, 2);
++	lpMainWindow->rcLCDUnmag = r;
++}
++
++/* Move the LCD child so it lines up with the magnified skin underneath it. The
++ * child scales its own contents to its client rect, so this is all that is
++ * needed for the screen to magnify along with the keys. */
++static void MagPlaceLCD(LPMAINWINDOW lpMainWindow) {
++	RECT r;
++	if (lpMainWindow->hwndLCD == NULL) {
++		return;
++	}
++	r = lpMainWindow->rcLCDUnmag;
++	if (r.right <= r.left || r.bottom <= r.top) {
++		return;		/* never captured a valid unmagnified rect */
++	}
++	if (lpMainWindow->bMagnify) {
++		double k = 1.0 - 1.0 / MAG_Z;
++		double cx = lpMainWindow->ptMagCenter.x * k;
++		double cy = lpMainWindow->ptMagCenter.y * k;
++		r.left		= (LONG)(MAG_Z * (r.left - cx));
++		r.right		= (LONG)(MAG_Z * (r.right - cx));
++		r.top		= (LONG)(MAG_Z * (r.top - cy));
++		r.bottom	= (LONG)(MAG_Z * (r.bottom - cy));
++	}
++	MoveWindow(lpMainWindow->hwndLCD, r.left, r.top,
++		r.right - r.left, r.bottom - r.top, TRUE);
++}
++
++static void SetMagnify(LPMAINWINDOW lpMainWindow, BOOL bOn) {
++	if ((lpMainWindow->bMagnify != FALSE) == (bOn != FALSE)) {
++		return;
++	}
++	if (bOn) {
++		MagCaptureLCDRect(lpMainWindow);
++	}
++	lpMainWindow->bMagnify = bOn;
++	MagClampCenter(lpMainWindow);
++	MagPlaceLCD(lpMainWindow);
++	InvalidateRect(lpMainWindow->hwndFrame, NULL, FALSE);
++}
++
++/* Press whatever key the keymap holds at this client point. Split out of
++ * WM_LBUTTONDOWN because the magnifier defers it to the button going back up;
++ * defined below WndProc so the button helpers it calls are already declared. */
++static void DoSkinKeyPress(LPMAINWINDOW lpMainWindow, LPCALC lpCalc, POINT pt);
++
+ LRESULT CALLBACK WndProc(HWND hwnd, UINT Message, WPARAM wParam, LPARAM lParam) {
+ 	LPMAINWINDOW lpMainWindow = (LPMAINWINDOW)GetWindowLongPtr(hwnd, GWLP_USERDATA);
+ 	LPCALC lpCalc = NULL;
+@@ -1345,15 +1422,28 @@
+ 				LONG updateHeight = ps.rcPaint.bottom - ps.rcPaint.top;
+ 
+ 				double skin_scale = lpMainWindow->skin_scale;
++
++				/* the source rect in client space; the magnifier only changes
++				 * this, so everything downstream is untouched */
++				double srcL = ps.rcPaint.left, srcT = ps.rcPaint.top;
++				double srcW = updateWidth, srcH = updateHeight;
++				if (lpMainWindow->bMagnify) {
++					double k = 1.0 - 1.0 / MAG_Z;
++					srcL = ps.rcPaint.left / MAG_Z + lpMainWindow->ptMagCenter.x * k;
++					srcT = ps.rcPaint.top / MAG_Z + lpMainWindow->ptMagCenter.y * k;
++					srcW = updateWidth / MAG_Z;
++					srcH = updateHeight / MAG_Z;
++				}
++
+ 				Rect updateRect(ps.rcPaint.left, ps.rcPaint.top, updateWidth, updateHeight);
+ 				Graphics g(hdc);
+ 				g.SetInterpolationMode(InterpolationModeLowQuality);
+ 				g.DrawImage(lpMainWindow->m_lpBitmapRenderedSkin,
+ 					updateRect,
+-					(INT) (ps.rcPaint.left / skin_scale),
+-					(INT) (ps.rcPaint.top / skin_scale),
+-					(INT) (updateWidth / skin_scale), 
+-					(INT) (updateHeight / skin_scale),
++					(INT) (srcL / skin_scale),
++					(INT) (srcT / skin_scale),
++					(INT) (srcW / skin_scale), 
++					(INT) (srcH / skin_scale),
+ 					UnitPixel);
+ 			}
+ 
+@@ -1364,6 +1454,19 @@
+ 			FillRect(hdc, &ps.rcPaint, GetStockBrush(GRAY_BRUSH));
+ 		}
+ 
++		if (lpMainWindow->bMagnify) {
++			/* a high-contrast frame, so it is never a mystery that the view is
++			 * zoomed. Three passes because one hairline is not enough at 10x. */
++			RECT rcMag;
++			HBRUSH hbrMag = CreateSolidBrush(RGB(255, 199, 0));
++			GetClientRect(hwnd, &rcMag);
++			for (int i = 0; i < 3; i++) {
++				FrameRect(hdc, &rcMag, hbrMag);
++				InflateRect(&rcMag, -1, -1);
++			}
++			DeleteObject(hbrMag);
++		}
++
+ 		ReleaseDC(hwnd, hdc);
+ 		EndPaint(hwnd, &ps);
+ 
+@@ -1975,6 +2078,15 @@
+ 			break;
+ 		}
+ 
++		/* A press released before MAG_HOLD is a click, so it types now. Holding
++		 * the button means "magnify", so the key cannot be sent on the way down
++		 * without every hold also typing whatever it was held over. */
++		if (lpMainWindow->bMagPending) {
++			lpMainWindow->bMagPending = FALSE;
++			KillTimer(hwnd, MAG_TIMER);
++			DoSkinKeyPress(lpMainWindow, lpCalc, lpMainWindow->ptMagPress);
++		}
++
+ 		BOOL repostMessage = FALSE;
+ 		keypad_t *kp = lpCalc->cpu.pio.keypad;
+ 
+@@ -2009,52 +2121,57 @@
+ 			break;
+ 		}
+ 
+-		int group, bit;
+-		POINT pt;
+-		keypad_t *kp = lpCalc->cpu.pio.keypad;
+-		if (kp == NULL) {
++		if (lpCalc->cpu.pio.keypad == NULL) {
+ 			break;
+ 		}
+ 
+ 		SetCapture(hwnd);
+-		pt.x	= GET_X_LPARAM(lParam);
+-		pt.y	= GET_Y_LPARAM(lParam);
++		lpMainWindow->ptMagPress.x = GET_X_LPARAM(lParam);
++		lpMainWindow->ptMagPress.y = GET_Y_LPARAM(lParam);
++		lpMainWindow->bMagPending = TRUE;
+ 
+-		for (group = 0; group < 7; group++) {
+-			for (bit = 0; bit < 8; bit++) {
+-				kp->keys[group][bit] &= (~KEY_MOUSEPRESS);
+-			}
++		/* the key is not sent yet - see WM_LBUTTONUP */
++		KillTimer(hwnd, MAG_TIMER);
++		SetTimer(hwnd, MAG_TIMER, MAG_HOLD, NULL);
++
++		if (lpMainWindow->bMagnify) {
++			lpMainWindow->ptMagCenter = lpMainWindow->ptMagPress;
++			MagClampCenter(lpMainWindow);
++			MagPlaceLCD(lpMainWindow);
++			InvalidateRect(hwnd, NULL, FALSE);
+ 		}
++		return 0;
++	}
++	case WM_MOUSEMOVE: {
++		POINT ptMove;
++		ptMove.x = GET_X_LPARAM(lParam);
++		ptMove.y = GET_Y_LPARAM(lParam);
+ 
+-		kp->on_pressed &= ~KEY_MOUSEPRESS;
+-
+-		LONG x = (LONG)(pt.x / lpMainWindow->skin_scale);
+-		LONG y = (LONG)(pt.y / lpMainWindow->skin_scale);
+-		Color c;
+-		lpMainWindow->m_lpBitmapKeymap->GetPixel(x, y, &c);
+-		if (c.GetRed() == 0xFF) {
+-			FinalizeButtons(lpMainWindow);
+-			return 0;
++		if (lpMainWindow->bMagPending &&
++			(abs(ptMove.x - lpMainWindow->ptMagPress.x) > MAG_SLOP ||
++			 abs(ptMove.y - lpMainWindow->ptMagPress.y) > MAG_SLOP)) {
++			/* a drag is not a hold, and it is not a keypress either */
++			lpMainWindow->bMagPending = FALSE;
++			KillTimer(hwnd, MAG_TIMER);
+ 		}
+ 
+-		group = c.GetGreen() >> 4;
+-		bit	= c.GetBlue() >> 4;
+-		HandleTeacherViewKey(lpMainWindow->hwndTeacherView, lpCalc);
+-		LogKeypress(lpMainWindow, lpCalc->model, group, bit);
+-		if (group == KEYGROUP_ON && bit == KEYBIT_ON){
+-			kp->on_pressed |= KEY_MOUSEPRESS;
+-			kp->on_last_pressed = lpCalc->cpu.timer_c->tstates;
+-		} else {
+-			kp->keys[group][bit] |= KEY_MOUSEPRESS;
+-			if ((kp->keys[group][bit] & KEY_STATEDOWN) == 0) {
+-				kp->keys[group][bit] |= KEY_STATEDOWN;
+-				kp->last_pressed[group][bit] = lpCalc->cpu.timer_c->tstates;
+-			}
++		if (lpMainWindow->bMagnify) {
++			lpMainWindow->ptMagCenter = ptMove;
++			MagClampCenter(lpMainWindow);
++			MagPlaceLCD(lpMainWindow);
++			InvalidateRect(hwnd, NULL, FALSE);
+ 		}
+-		FinalizeButtons(lpMainWindow);
+-		return 0;
++		break;
+ 	}
+ 	case WM_TIMER: {
++		if (wParam == MAG_TIMER) {
++			KillTimer(hwnd, MAG_TIMER);
++			/* held long enough: this gesture magnifies instead of typing */
++			lpMainWindow->bMagPending = FALSE;
++			lpMainWindow->ptMagCenter = lpMainWindow->ptMagPress;
++			SetMagnify(lpMainWindow, !lpMainWindow->bMagnify);
++			return 0;
++		}
+ 		if (wParam == KEY_TIMER) {
+ 			PostMessage(hwnd, WM_LBUTTONUP, 0, 0);
+ 		}
+@@ -2090,6 +2207,10 @@
+ 		return 0;
+ 	}
+ 	case WM_KEYDOWN: {
++		if (wParam == VK_ESCAPE && lpMainWindow->bMagnify) {
++			SetMagnify(lpMainWindow, FALSE);	/* escape leaves the magnifier first */
++			return 0;
++		}
+ 		HandleKeyDown(lpMainWindow, wParam);
+ 		return 0;
+ 	}
+@@ -2112,6 +2233,10 @@
+ 			wParam, (RECT *)lParam, lpCalc->cpu.pio.lcd->width);
+ 	}
+ 	case WM_SIZE: {
++		/* the resize path repositions the LCD child itself, so the remembered
++		 * unmagnified rect is about to be stale: start clean. */
++		lpMainWindow->bMagnify = FALSE;
++
+ 		RECT rc = { 0 };
+ 		rc.bottom = HIWORD(lParam);
+ 		rc.right = LOWORD(lParam);
+@@ -2316,4 +2441,45 @@
+ 		return DefWindowProc(hwnd, Message, wParam, lParam);
+ 	}
+ 	return 0;
++}
++
++static void DoSkinKeyPress(LPMAINWINDOW lpMainWindow, LPCALC lpCalc, POINT pt) {
++	int group, bit;
++	keypad_t *kp = lpCalc->cpu.pio.keypad;
++	if (kp == NULL || lpMainWindow->m_lpBitmapKeymap == NULL) {
++		return;
++	}
++
++	for (group = 0; group < 7; group++) {
++		for (bit = 0; bit < 8; bit++) {
++			kp->keys[group][bit] &= (~KEY_MOUSEPRESS);
++		}
++	}
++
++	kp->on_pressed &= ~KEY_MOUSEPRESS;
++
++	LONG x = (LONG)(pt.x / lpMainWindow->skin_scale);
++	LONG y = (LONG)(pt.y / lpMainWindow->skin_scale);
++	Color c;
++	lpMainWindow->m_lpBitmapKeymap->GetPixel(x, y, &c);
++	if (c.GetRed() == 0xFF) {
++		FinalizeButtons(lpMainWindow);
++		return;
++	}
++
++	group = c.GetGreen() >> 4;
++	bit = c.GetBlue() >> 4;
++	HandleTeacherViewKey(lpMainWindow->hwndTeacherView, lpCalc);
++	LogKeypress(lpMainWindow, lpCalc->model, group, bit);
++	if (group == KEYGROUP_ON && bit == KEYBIT_ON) {
++		kp->on_pressed |= KEY_MOUSEPRESS;
++		kp->on_last_pressed = lpCalc->cpu.timer_c->tstates;
++	} else {
++		kp->keys[group][bit] |= KEY_MOUSEPRESS;
++		if ((kp->keys[group][bit] & KEY_STATEDOWN) == 0) {
++			kp->keys[group][bit] |= KEY_STATEDOWN;
++			kp->last_pressed[group][bit] = lpCalc->cpu.timer_c->tstates;
++		}
++	}
++	FinalizeButtons(lpMainWindow);
+ }
+\ No newline at end of file
+--- a/gui/guilcd.c
++++ b/gui/guilcd.c
+@@ -2,6 +2,7 @@
+ 
+ #include "gui.h"
+ #include "guilcd.h"
++#include "registry.h"
+ #include "guibuttons.h"
+ #include "calc.h"
+ #include "sound.h"
+@@ -33,6 +34,38 @@
+ BITMAPINFO *contrastbi = NULL;
+ BITMAPINFO *colorbi = NULL;
+ 
++/* --- accessibility LCD themes ----------------------------------------------
++ * lcd_theme in the settings picks the black-and-white LCD palette:
++ *   0 original green   1 day (black on white)
++ *   2 night (white on black)   3 night amber (amber on black)
++ * Putting it in the settings means one build covers all of them: in portable
++ * mode each Wabbitemu.ini beside the exe chooses its own.
++ * ------------------------------------------------------------------------- */
++static int LCDThemeIndex(void) {
++	static int theme = -1;
++	if (theme < 0) {
++		theme = (int) QueryWabbitKey(_T("lcd_theme"));
++		if (theme < 0 || theme > 3) {
++			theme = 0;
++		}
++	}
++	return theme;
++}
++
++/* Endpoints of each channel's linear ramp: pixel off -> pixel fully on. */
++static void LCDThemeRamp(int theme, int *off, int *on) {
++	static const int ramps[4][6] = {
++		{ 0x9E, 0xAB, 0x88,   0x00, 0x00, 0x00 },	/* original green */
++		{ 0xFF, 0xFF, 0xFF,   0x00, 0x00, 0x00 },	/* day */
++		{ 0x00, 0x00, 0x00,   0xFF, 0xFF, 0xFF },	/* night */
++		{ 0x00, 0x00, 0x00,   0xFF, 0xBF, 0x00 },	/* night amber */
++	};
++	for (int i = 0; i < 3; i++) {
++		off[i] = ramps[theme][i];
++		on[i] = ramps[theme][i + 3];
++	}
++}
++
+ HDC DrawDragPanes(HWND hwnd, HDC hdcDest, LPMAINWINDOW lpMainWindow) {
+ 	if (!lpMainWindow->is_calc_file) {
+ 		return NULL;
+@@ -347,10 +380,13 @@
+ 				bi->bmiHeader.biClrImportant = MAX_SHADES+1;
+ 
+ #define LCD_HIGH	255
++				int off[3], on[3];
++				LCDThemeRamp(LCDThemeIndex(), off, on);
+ 				for (int i = 0; i <= MAX_SHADES; i++) {
+-					bi->bmiColors[i].rgbRed = (BYTE)((0x9E * (256 - (LCD_HIGH / MAX_SHADES)*i)) / 255);
+-					bi->bmiColors[i].rgbGreen = (BYTE)((0xAB * (256 - (LCD_HIGH / MAX_SHADES)*i)) / 255);
+-					bi->bmiColors[i].rgbBlue = (BYTE)((0x88 * (256 - (LCD_HIGH / MAX_SHADES)*i)) / 255);
++					int t = 256 - (LCD_HIGH / MAX_SHADES) * i;	/* 256 = off, ~0 = fully on */
++					bi->bmiColors[i].rgbRed = (BYTE)((off[0] * t + on[0] * (256 - t)) / 256);
++					bi->bmiColors[i].rgbGreen = (BYTE)((off[1] * t + on[1] * (256 - t)) / 256);
++					bi->bmiColors[i].rgbBlue = (BYTE)((off[2] * t + on[2] * (256 - t)) / 256);
+ 				}
+ 			}
+ 
+@@ -368,10 +404,20 @@
+ 				contrastbi->bmiHeader.biClrUsed = MAX_SHADES + 1;
+ 				contrastbi->bmiHeader.biClrImportant = MAX_SHADES + 1;
+ 
++				int coff[3], con[3];
++				int ctheme = LCDThemeIndex();
++				LCDThemeRamp(ctheme, coff, con);
+ 				for (int i = 0; i <= MAX_SHADES; i++) {
+-					contrastbi->bmiColors[i].rgbRed = (BYTE)((0x9E * (256 - (LCD_HIGH / MAX_SHADES)*i)) / 255);
+-					contrastbi->bmiColors[i].rgbGreen = (BYTE)((0xAB * (256 - (LCD_HIGH / MAX_SHADES)*i)) / 255);
+-					contrastbi->bmiColors[i].rgbBlue = (BYTE)(0x20 - ((0x88 * (256 - (LCD_HIGH / MAX_SHADES)*i)) / 255));
++					int t = 256 - (LCD_HIGH / MAX_SHADES) * i;
++					contrastbi->bmiColors[i].rgbRed = (BYTE)((coff[0] * t + con[0] * (256 - t)) / 256);
++					contrastbi->bmiColors[i].rgbGreen = (BYTE)((coff[1] * t + con[1] * (256 - t)) / 256);
++					if (ctheme == 0) {
++						/* the stock build shifts blue down at high contrast */
++						contrastbi->bmiColors[i].rgbBlue = (BYTE)(0x20 - ((0x88 * t) / 255));
++					} else {
++						/* an accessibility theme should not change hue with contrast */
++						contrastbi->bmiColors[i].rgbBlue = (BYTE)((coff[2] * t + con[2] * (256 - t)) / 256);
++					}
+ 				}
+ 			}
+ 
+@@ -465,6 +511,19 @@
+ 			return 0;
+ 		}
+ 		case WM_MOUSEMOVE: {		
++			{
++				/* let the frame keep tracking the pointer while the magnifier
++				 * is on: this child covers the LCD, so without this the zoom
++				 * would freeze whenever the pointer crossed the screen */
++				POINT ptFwd;
++				HWND hwndParent = GetParent(hwnd);
++				ptFwd.x = GET_X_LPARAM(lParam);
++				ptFwd.y = GET_Y_LPARAM(lParam);
++				MapWindowPoints(hwnd, hwndParent, &ptFwd, 1);
++				PostMessage(hwndParent, WM_MOUSEMOVE, wParam,
++					MAKELPARAM(ptFwd.x, ptFwd.y));
++			}
++
+ 			if (wParam != MK_LBUTTON) {
+ 				lpMainWindow->dwDragCountdown = 0;
+ 			} else if (gif_write_state == GIF_IDLE) {
+--- a/gui/registry.c
++++ b/gui/registry.c
+@@ -36,6 +36,7 @@
+ 	{_T("gif_framerate"),			REG_DWORD,	4},
+ 	{_T("gif_gray_size"),			REG_DWORD,  2},
+ 	{_T("gif_color_size"),			REG_DWORD,  1},
++	{_T("lcd_theme"),				REG_DWORD,	0},		// 0 green, 1 day, 2 night, 3 night amber
+ 	{_T("lcd_mode"),				REG_DWORD,	0},		// perfect gray
+ 	{_T("lcd_freq"),				REG_DWORD,	FPS},	// steady freq
+ 	{_T("screen_scale"),			REG_DWORD,  2},

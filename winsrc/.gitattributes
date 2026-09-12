@@ -1,0 +1,4 @@
+# The patch must keep its CRLF endings or it will no longer match WabbitEmu's
+# CRLF sources, and Windows INI readers expect CRLF too.
+*.patch -text
+*.ini   -text
