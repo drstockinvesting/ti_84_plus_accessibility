@@ -1,0 +1,76 @@
+================================================================
+  TI-84 Plus CE  --  switching between the two screen sizes
+================================================================
+
+There are two ways to run the calculator.
+
+
+  FULL CALCULATOR          the normal window:
+                           screen on top, keypad underneath.
+
+  BIG CALCULATOR SCREEN    the calculator screen only,
+                           filling the whole display.
+                           About 4x bigger (1266 x 950).
+                           Type on the Mac keyboard in this mode --
+                           the on-screen keypad is not shown.
+
+
+----------------------------------------------------------------
+  HOW TO SWITCH
+----------------------------------------------------------------
+
+Double-click one of these, in the same folder as this file:
+
+    Full Calculator.app
+    Big Calculator Screen.app
+
+The calculator closes and reopens in the mode you picked.
+Whatever is on the calculator screen is kept.
+
+THE FIRST TIME you use one of them, macOS will ask:
+
+    "Full Calculator.app" wants to control "CEmu.app"
+
+Click OK / Allow. It only asks once. The launcher needs this
+in order to close the calculator properly -- closing it any
+other way would throw away your unsaved work.
+
+
+----------------------------------------------------------------
+  THE QUICK WAY, WITH NO RESTART
+----------------------------------------------------------------
+
+While the calculator is running, hold  fn  and press  F11 .
+
+    press once  -> the window fills the display
+    press again -> BIG SCREEN (calculator screen only)
+    press again -> back to the normal window
+
+This is instant and does not restart anything. It is the same
+feature the launchers use; the launchers just exist so you do
+not have to remember the key.
+
+
+----------------------------------------------------------------
+  IF YOU GET STUCK IN BIG SCREEN MODE
+----------------------------------------------------------------
+
+Any one of these gets you out:
+
+  * hold fn and press F11
+  * right-click anywhere on the calculator screen -- the
+    File / Calculator / Docks / Extras menus all appear there
+  * double-click "Full Calculator.app"
+
+
+----------------------------------------------------------------
+  IF THE SCREEN AND KEYPAD EVER COME APART
+----------------------------------------------------------------
+
+In the menu bar at the top:  Docks
+
+    "Screen"               shows or hides the calculator screen
+    "Enable UI edit mode"  lets the panels be dragged around
+
+Leave "Enable UI edit mode" switched OFF. With it off the panels
+are locked together and cannot be pulled apart by accident.
