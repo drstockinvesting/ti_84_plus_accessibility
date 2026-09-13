@@ -9,7 +9,9 @@ set -euo pipefail
 DEST="$HOME/Documents/CEmu"
 TOOLS="$DEST/tools"
 mkdir -p "$TOOLS"
-cp "$(dirname "$0")/cemu-mode.sh" "$TOOLS/cemu-mode.sh"
+cp "$(dirname "$0")/cemu-mode.sh"    "$TOOLS/cemu-mode.sh"
+cp "$(dirname "$0")/cemu_fitsize.py" "$TOOLS/cemu_fitsize.py"
+cp "$(dirname "$0")/../cemu_qini.py" "$TOOLS/cemu_qini.py"
 chmod +x "$TOOLS/cemu-mode.sh"
 
 build() {

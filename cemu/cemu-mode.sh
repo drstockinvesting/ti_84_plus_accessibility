@@ -1,7 +1,8 @@
 #!/bin/bash
 # cemu-mode.sh -- switch CEmu between the docked calculator and the big detached screen.
 #
-#   cemu-mode.sh keypad   full calculator: screen + keypad in one window (issue #1 layout)
+#   cemu-mode.sh keypad   full calculator: screen + keypad in one window, and resets
+#                         the window to the size where the two panels line up
 #   cemu-mode.sh screen   detached screen only, filling the display (~4x linear)
 #   cemu-mode.sh toggle   flip to whichever one it is not in
 #
@@ -81,6 +82,14 @@ if n == 0:
     new = 'fullscreen=' + want + '\n' + sec
 open(path, 'w').write(t[:m.start(1)] + new + t[m.end(1):])
 PY
+
+# Going back to the full calculator also restores the one window size where the
+# two panels line up. CEmu scales them by different rules -- fixed-size screen
+# pinned left, aspect-locked keypad centred horizontally but anchored to the top --
+# so at any other size the calculator is visibly in two pieces (issue 3).
+if [ "$WANT" = "0" ]; then
+  python3 "$(dirname "$0")/cemu_fitsize.py" || echo "size reset skipped" >&2
+fi
 
 open "$APP"
 

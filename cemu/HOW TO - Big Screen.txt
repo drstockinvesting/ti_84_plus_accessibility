@@ -64,7 +64,26 @@ Any one of these gets you out:
 
 
 ----------------------------------------------------------------
-  IF THE SCREEN AND KEYPAD EVER COME APART
+  DO NOT DRAG THE WINDOW BIGGER
+----------------------------------------------------------------
+
+Dragging the window edges does NOT make the calculator bigger.
+The screen stays the same size and slides to the top-left, and
+the keypad stays the same size in the bottom-middle, so the
+calculator comes apart into two pieces.
+
+If that happens, double-click:
+
+    Full Calculator.app
+
+It puts the window back to the one size where the screen and the
+keypad line up.
+
+To get a BIGGER screen, use "Big Calculator Screen.app" instead.
+
+
+----------------------------------------------------------------
+  IF THE PANELS EVER GET PULLED APART
 ----------------------------------------------------------------
 
 In the menu bar at the top:  Docks
