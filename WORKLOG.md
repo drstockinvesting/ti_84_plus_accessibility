@@ -277,7 +277,20 @@ Run everything from this folder with `/opt/homebrew/bin/python3.11`. The system 
    - **The keypad's zoom centre is now clamped to the keys.** The drawing keeps its aspect ratio and is centred in whatever the layout gives the widget, so a window wider than the calculator has dead space either side. Starting the magnifier from the menu with the pointer parked out there filled the entire magnified view with empty background - survivable while the screen magnified alongside it, useless once the keypad is all there is. Caught on screen, not in review.
    - Comparison image: `cemu/magnify-keypad-only.png` (keys at 4x, screen untouched above them).
    - **Windows is built by GitHub Actions, not on this Mac.** `.github/workflows/build-windows.yml` in `drstockinvesting/cemu-accessible-build` builds MSVC x64 against Qt 6.6.3 and uploads a `windeployqt`-packaged `dist/` as the `CEmu-Windows-x64` artifact; a push to `main` is the trigger, so the same source commit produces both editions. Download is `gh run download`, about 3 MB for the exe.
-   - **The CI build is unsigned.** The Authenticode signature on the exe in `CEmu Windows/` was applied elsewhere with a key we do not have here (only the public `CEmu-Accessible.cer` is in the folder), so a freshly built exe has to be re-signed on the Windows side or run via `Start-CEmu.bat`, which clears Mark-of-the-Web.
+   - **The CI build arrives unsigned, and is re-signed here.** GitHub Actions does not sign anything, so the artifact's exe has no Authenticode signature and Windows calls it an unknown publisher even with `CEmu-Accessible.cer` installed.
+   - **Where the signing key actually was, which cost a search.** `CEmu Windows/` holds only the *public* `CEmu-Accessible.cer`, and nothing under `~/Documents` or `~/Downloads` matched `*.pfx`/`*.p12` - the first conclusion was that the key only existed on the Windows side. It did not: Antigravity had generated the certificate on this Mac and left the whole set in its own working directory, `~/.gemini/antigravity-ide/brain/<session-uuid>/scratch/` - `cemu_codesign.key` (unencrypted PEM), `cemu_codesign.crt`, `cemu_codesign.pfx` (password-protected, so the PEM pair is the usable one) and `codesign.cnf`. **Lesson: search the whole home directory for key material, not just the document tree - an IDE agent's scratch space is a real location.**
+   - **That directory is not a safe home for it.** It is a per-session scratch folder belonging to another tool; if it is cleaned up the certificate can never be used again, and re-issuing means the student has to install a new `.cer` on the Windows machine. The key should be moved somewhere durable and kept out of both repos.
+   - **Signing on macOS, no Windows and no signtool needed.** `osslsigncode` (Homebrew, already installed) signs a PE with a PEM key/cert pair, matching what was applied before:
+     ```
+     osslsigncode sign -certs cemu_codesign.crt -key cemu_codesign.key \
+       -h sha256 -n "CEmu Accessible" \
+       -i "https://github.com/drstockinvesting/cemu-accessible-build" \
+       -ts "http://timestamp.digicert.com" \
+       -in CEmu-unsigned.exe -out CEmu.exe
+     ```
+     `osslsigncode verify` then reports *Signature verification: ok* and *Timestamp Server Signature verification: ok*. The `-CAfile` argument wants **PEM**; pointing it at the DER `CEmu-Accessible.cer` fails with "no certificate found", which looks like a bad signature and is not.
+   - **Keep `CEmu-unsigned.exe` as the pristine CI output.** Signing is not idempotent - re-signing an already-signed exe appends or replaces a certificate table - so every signature is applied to the unsigned copy and written out as `CEmu.exe`.
+   - **The timestamp matters more than the signature here.** The certificate is self-signed and expires in 2036; an RFC3161 countersignature from DigiCert (a few KB over the wire) means the signature still validates after that date. The cert the student installs is unchanged - same serial `3101...9673`, same SHA1 `FA:29:1D:13:...:0B:60` - so `Install-Certificate.bat` did not need reissuing.
 
 
 ## Facts from the CEmu source (CE-Programming/CEmu, tag v2.0)
