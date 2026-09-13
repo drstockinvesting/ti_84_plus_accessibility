@@ -1,0 +1,93 @@
+================================================================
+  TI-84 Plus CE (CEmu Accessible) -- Windows User Guide
+================================================================
+
+This folder contains the Windows 64-bit edition of CEmu Accessible,
+configured to run portably with zero administrator privileges.
+
+
+----------------------------------------------------------------
+  HOW TO START
+----------------------------------------------------------------
+
+Option 1: Double-click  Start-CEmu.bat
+          (Automatically unblocks downloaded file flags and launches)
+
+Option 2: Double-click  CEmu.exe  directly.
+
+
+----------------------------------------------------------------
+  FIRST-TIME SECURITY SETUP (NO ADMINISTRATOR RIGHTS REQUIRED)
+----------------------------------------------------------------
+
+CEmu is digitally signed with an Authenticode security certificate.
+
+To ensure Windows Defender / SmartScreen recognises the application
+as trusted without showing "Unknown Publisher" or security flags:
+
+1. Double-click  Install-Certificate.bat
+2. A window will confirm the certificate is installed for your
+   user account.
+3. Done!
+
+* Note: This installs ONLY to your personal Current User certificate
+  store (`certutil -user`). It NEVER requires Administrator elevation
+  or UAC prompts, and works on standard student/school Windows accounts.
+
+
+----------------------------------------------------------------
+  ACCESSIBILITY FEATURES
+----------------------------------------------------------------
+
+1. UNIFIED WINDOW RESIZING
+   Drag any edge or corner of the calculator window. The screen
+   and the keypad grow and shrink together proportionally, maintaining
+   the authentic TI-84 Plus CE shape without separating.
+
+2. 4X KEYPAD MAGNIFIER
+   To make the KEYS 4 times bigger for a close-up look:
+     - Click and hold the mouse on the calculator SCREEN for about
+       half a second (550 ms).
+     - A bright yellow border appears around the keys.
+     - Move the mouse over them -- the magnified view follows the cursor.
+     - The keys still work while magnified: whatever is under the
+       pointer is the key that gets pressed.
+   The SCREEN itself does not zoom, on purpose. It already grows with
+   the window and can be detached into a window of its own (item 4),
+   so magnifying it as well would only cut off the line being read.
+   To exit magnification:
+     - Click and hold on the screen again, OR
+     - Press the  Esc  key, OR
+     - Choose  Extras > Magnify Keypad .
+
+3. HIGH-CONTRAST SCREEN COLORS
+   Right-click anywhere on the calculator screen and choose "Screen Colors":
+     - High Contrast (cool on black): Black background with cool-toned
+       graph lines (green, cyan, blue, purple, pink).
+     - High Contrast (white on black): Pure white on black.
+     - Original: Standard TI-84 Plus CE daylight appearance.
+   The top status bar (battery, radian/degree mode) remains comfortably dark.
+
+4. DETACHED SCREEN (SCREEN IN ITS OWN WINDOW)
+   Take the screen out into an independent, freely-resizable window:
+     - Right-click the screen and choose "Detach Screen", OR
+     - Choose  Extras > Detach Screen  from the menu bar.
+   The screen window can be dragged and resized as large as your monitor
+   permits, while keeping the keypad in the original window.
+   To re-attach: Click the red close button on the Screen window, or
+   choose "Detach Screen" again.
+
+5. BIG SCREEN MODE (SCREEN ONLY)
+   Press  F11  (or  fn + F11  depending on your PC keyboard settings):
+     - Press once: Window expands to fill display.
+     - Press again: BIG SCREEN (calculator screen only, no keypad).
+     - Press again: Restores normal window with keypad.
+
+
+----------------------------------------------------------------
+  ROM FILE
+----------------------------------------------------------------
+
+The required  TI-84Plus_CE_ROM.rom  is included directly in this folder.
+If CEmu asks for a ROM on first launch, simply select
+TI-84Plus_CE_ROM.rom located in this same folder.

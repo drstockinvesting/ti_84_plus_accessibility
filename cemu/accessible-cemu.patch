@@ -1,8 +1,94 @@
+diff --git a/.DS_Store b/.DS_Store
+new file mode 100644
+index 0000000..b5e4d73
+Binary files /dev/null and b/.DS_Store differ
+diff --git a/.github/workflows/build-windows.yml b/.github/workflows/build-windows.yml
+new file mode 100644
+index 0000000..73fd3d5
+--- /dev/null
++++ b/.github/workflows/build-windows.yml
+@@ -0,0 +1,57 @@
++name: Build Windows CEmu Accessible
++
++on:
++  push:
++    branches: [ main ]
++  workflow_dispatch:
++
++jobs:
++  build:
++    name: Build Windows x64
++    runs-on: windows-latest
++
++    steps:
++      - name: Checkout repository
++        uses: actions/checkout@v4
++        with:
++          submodules: recursive
++
++      - name: Setup Ninja
++        uses: ashutoshvarma/setup-ninja@master
++        with:
++          version: 1.11.1
++
++      - name: Setup MSVC developer environment
++        uses: ilammy/msvc-dev-cmd@v1
++        with:
++          arch: x64
++
++      - name: Install Qt 6.6.3
++        uses: jurplel/install-qt-action@v4
++        with:
++          version: '6.6.3'
++          arch: 'win64_msvc2019_64'
++          modules: 'qtimageformats'
++
++      - name: Configure CMake
++        shell: cmd
++        run: |
++          cmake -B build -S gui/qt -G "Ninja" -DCMAKE_BUILD_TYPE=Release -DCMAKE_PREFIX_PATH="%QT_ROOT_DIR%" -DSHORT_VERSION="v2.0" -DIS_OFFICIAL_RELEASE_VERSION=ON
++
++      - name: Build CEmu
++        shell: cmd
++        run: |
++          cmake --build build --config Release
++
++      - name: Package with windeployqt
++        shell: cmd
++        run: |
++          mkdir dist
++          copy build\CEmu.exe dist\
++          windeployqt --release --no-translations --compiler-runtime dist\CEmu.exe
++
++      - name: Upload Windows Artifact
++        uses: actions/upload-artifact@v4
++        with:
++          name: CEmu-Windows-x64
++          path: dist/
 diff --git a/gui/qt/CMakeLists.txt b/gui/qt/CMakeLists.txt
-index 2b3f165..c9a166f 100644
+index 2b3f165..737a1b1 100644
 --- a/gui/qt/CMakeLists.txt
 +++ b/gui/qt/CMakeLists.txt
-@@ -163,6 +163,7 @@ set(CEmu_Sources
+@@ -77,10 +77,16 @@ endif()
+ include(GNUInstallDirs)
+ 
+ if(USE_QT5)
+-    find_package(Qt5 REQUIRED COMPONENTS Core DBus Gui Network Widgets)
++    find_package(Qt5 REQUIRED COMPONENTS Core Gui Network Widgets)
++    if(NOT WIN32)
++        find_package(Qt5 COMPONENTS DBus)
++    endif()
+ else()
+     find_package(QT NAMES Qt6 REQUIRED COMPONENTS Core)
+-    find_package(Qt6 REQUIRED COMPONENTS DBus Gui Network Widgets)
++    find_package(Qt6 REQUIRED COMPONENTS Gui Network Widgets)
++    if(NOT WIN32)
++        find_package(Qt6 COMPONENTS DBus)
++    endif()
+ endif()
+ 
+ set(CMAKE_AUTORCC ON)
+@@ -163,6 +169,7 @@ set(CEmu_Sources
      keypad/rectkey.cpp keypad/rectkey.h
      keypad/secondkey.h
      lcdwidget.cpp lcdwidget.h
@@ -10,6 +96,35 @@ index 2b3f165..c9a166f 100644
      main.cpp
      mainwindow.cpp mainwindow.h mainwindow.ui
      memorywidget.cpp
+@@ -271,10 +278,12 @@ endif()
+ target_link_libraries(CEmu PRIVATE
+     Qt::Core
+     Qt::Gui
+-    Qt::DBus # needed at runtime by QtGui for some reason...?
+     Qt::Network
+     Qt::Widgets
+ )
++if(TARGET Qt::DBus)
++    target_link_libraries(CEmu PRIVATE Qt::DBus)
++endif()
+ 
+ include(CheckIPOSupported)
+ check_ipo_supported(RESULT lto_supported OUTPUT error)
+diff --git a/gui/qt/capture/animated-png.c b/gui/qt/capture/animated-png.c
+index 0ffd2b8..6115902 100644
+--- a/gui/qt/capture/animated-png.c
++++ b/gui/qt/capture/animated-png.c
+@@ -336,6 +336,10 @@ err:
+ 
+ #else
+ 
++#ifdef _MSC_VER
++#pragma message("LibPNG APNG functions not available - Animated PNG capture will not be available")
++#else
+ #warning "LibPNG APNG functions not available - Animated PNG capture will not be available"
++#endif
+ 
+ #endif
 diff --git a/gui/qt/debugger.cpp b/gui/qt/debugger.cpp
 index 9c047f1..51c4b14 100644
 --- a/gui/qt/debugger.cpp
@@ -119,7 +234,7 @@ index c1f7958..ef3f6cc 100644
  
  #endif
 diff --git a/gui/qt/keypad/keypadwidget.cpp b/gui/qt/keypad/keypadwidget.cpp
-index 34d7e6d..22727ed 100644
+index 34d7e6d..e087cec 100644
 --- a/gui/qt/keypad/keypadwidget.cpp
 +++ b/gui/qt/keypad/keypadwidget.cpp
 @@ -1,9 +1,11 @@
@@ -134,7 +249,7 @@ index 34d7e6d..22727ed 100644
  #include "graphkey.h"
  #include "secondkey.h"
  #include "alphakey.h"
-@@ -17,6 +19,33 @@
+@@ -17,6 +19,34 @@
  
  const QRect KeypadWidget::sBaseRect{{}, QSize{162, 238}};
  
@@ -156,10 +271,11 @@ index 34d7e6d..22727ed 100644
 +        if (on) {
 +            /* The gesture that turns this on happens over the screen, so the
 +             * pointer is usually not here yet. Start from the middle of the
-+             * keypad rather than from wherever it was last seen, which could be
++             * keys rather than from wherever it was last seen, which could be
 +             * a corner from minutes ago. */
 +            const QPoint here = mapFromGlobal(QCursor::pos());
-+            mMagCentre = rect().contains(here) ? QPointF(here) : QPointF(rect().center());
++            mMagCentre = rect().contains(here) ? magCentre(QPointF(here))
++                                               : magCentre(QRectF(mTransform.mapRect(sBaseRect)).center());
 +        }
 +        update();
 +    });
@@ -168,7 +284,7 @@ index 34d7e6d..22727ed 100644
  void KeypadWidget::addKey(Key *key) {
      const KeyCode code = key->keycode();
      unsigned char row = code.row();
-@@ -322,30 +351,46 @@ KeypadWidget::~KeypadWidget() {
+@@ -322,30 +352,59 @@ KeypadWidget::~KeypadWidget() {
  void KeypadWidget::resizeEvent(QResizeEvent *event) {
      QSize size{sBaseRect.size().scaled(event->size(), Qt::KeepAspectRatio)},
          origin{(event->size() - size) / 2};
@@ -182,6 +298,19 @@ index 34d7e6d..22727ed 100644
      mInverseTransform = mTransform.inverted();
  }
  
++QPointF KeypadWidget::magCentre(const QPointF &pos) const {
++    /* The keypad drawing keeps its aspect ratio and is centred in whatever the
++     * layout hands the widget, so a window wider than the calculator leaves dead
++     * space either side of the keys. Clamping the centre to the keys means a
++     * pointer out in that margin parks the view on the nearest key instead of
++     * filling it with empty background -- which, now that the screen no longer
++     * magnifies alongside it, would be the entire magnified view. Nothing is
++     * lost by it: there is no key out there to press or to look at. */
++    const QRectF keys = mTransform.mapRect(QRectF(sBaseRect));
++    return QPointF(qBound(keys.left(), pos.x(), keys.right()),
++                   qBound(keys.top(),  pos.y(), keys.bottom()));
++}
++
  void KeypadWidget::paintEvent(QPaintEvent *event) {
 +    const bool magnified = magnifier->isActive();
 +    /* The damage region is in widget coordinates, so it only maps back to key
@@ -218,7 +347,7 @@ index 34d7e6d..22727ed 100644
  }
  
  void KeypadWidget::changeKeyState(KeyCode code, bool press) {
-@@ -359,7 +404,11 @@ void KeypadWidget::changeKeyState(KeyCode code, bool press) {
+@@ -359,7 +418,11 @@ void KeypadWidget::changeKeyState(KeyCode code, bool press) {
  void KeypadWidget::updateKey(Key *key, bool wasSelected) {
      bool selected = key->isSelected();
      if (selected != wasSelected) {
@@ -231,7 +360,7 @@ index 34d7e6d..22727ed 100644
          emu_keypad_event(key->keycode().row(), key->keycode().col(), selected);
          if (selected) {
              QString out = QStringLiteral("[") + key->getLabel() + QStringLiteral("]");
-@@ -408,8 +457,26 @@ void KeypadWidget::mouseEvent(QMouseEvent *event) {
+@@ -408,8 +471,26 @@ void KeypadWidget::mouseEvent(QMouseEvent *event) {
          return;
      }
      switch (event->type()) {
@@ -242,7 +371,7 @@ index 34d7e6d..22727ed 100644
 +             * only move the magnifier -- otherwise hovering would type. */
 +            if (event->buttons() == Qt::NoButton) {
 +                if (magnifier->isActive()) {
-+                    mMagCentre = event->localPos();
++                    mMagCentre = magCentre(event->localPos());
 +                    update();
 +                }
 +                break;
@@ -250,7 +379,7 @@ index 34d7e6d..22727ed 100644
 +            Q_FALLTHROUGH();
 +        case QEvent::MouseButtonPress:
 +            if (magnifier->isActive()) {
-+                mMagCentre = event->localPos();
++                mMagCentre = magCentre(event->localPos());
 +                update();
 +            }
 +            /* No remapping needed: the magnifier leaves the source point under
@@ -260,7 +389,7 @@ index 34d7e6d..22727ed 100644
              break;
          case QEvent::MouseButtonRelease:
 diff --git a/gui/qt/keypad/keypadwidget.h b/gui/qt/keypad/keypadwidget.h
-index eb27547..3419694 100644
+index eb27547..3b10ef2 100644
 --- a/gui/qt/keypad/keypadwidget.h
 +++ b/gui/qt/keypad/keypadwidget.h
 @@ -5,6 +5,7 @@
@@ -288,22 +417,23 @@ index eb27547..3419694 100644
      virtual ~KeypadWidget();
  
      void setType(bool, unsigned int);
-@@ -57,6 +50,13 @@ private:
+@@ -56,6 +49,14 @@ public slots:
+ private:
      void updateKey(Key *key, bool);
      void addKey(Key *key);
- 
++    QPointF magCentre(const QPointF &pos) const;
++
 +    /* The keypad follows the shared magnifier but never starts it: CEmu delivers
 +     * real press and release to the emulated hardware, so holding a key repeats
 +     * it as a physical TI-84 does, and a long press here would have to take that
-+     * away. See magnifier.h. Its own centre is kept separately from the screen's,
-+     * so the screen stays parked on whatever was being read. */
++     * away. The keypad is also the only thing that magnifies -- see magnifier.h.
++     * Kept in widget coordinates, always on the keys themselves. */
 +    QPointF mMagCentre;
-+
+ 
      unsigned int color = KEYPAD_BLACK;
      bool mHoldingEnabled = true;
-     QColor cclrBackground;
 diff --git a/gui/qt/lcdwidget.cpp b/gui/qt/lcdwidget.cpp
-index e5ed126..6b8b374 100644
+index e5ed126..8d6f206 100644
 --- a/gui/qt/lcdwidget.cpp
 +++ b/gui/qt/lcdwidget.cpp
 @@ -1,4 +1,5 @@
@@ -312,87 +442,36 @@ index e5ed126..6b8b374 100644
  #include "sendinghandler.h"
  #include "keypad/qtkeypadbridge.h"
  #include "capture/animated-png.h"
-@@ -16,7 +17,9 @@
+@@ -16,6 +17,7 @@
  #include <QtCore/QMetaMethod>
  #include <QtCore/QTimer>
  #include <QtGui/QPainter>
 +#include <QtGui/QColor>
  #include <QtGui/QMouseEvent>
-+#include <QtGui/QCursor>
  #include <QtGui/QDrag>
  #include <QtWidgets/QMenu>
- #include <QtWidgets/QApplication>
-@@ -35,6 +38,43 @@ LCDWidget::LCDWidget(QWidget *parent) : QWidget{parent} {
+@@ -35,6 +37,20 @@ LCDWidget::LCDWidget(QWidget *parent) : QWidget{parent} {
          interlacePixels[index] = 255 * 4 / 10;
          interlacePixels[index + 1] = 255 * 6 / 10;
      }
 +
 +    m_holdTimer.setSingleShot(true);
 +    m_holdTimer.setInterval(Magnifier::HoldMs);
++    /* The screen carries the gesture but is never itself magnified: see
++     * magnifier.h. Nothing here has to react to the state, so the widget also
++     * keeps mouse tracking off and repaints no differently than before. */
 +    connect(&m_holdTimer, &QTimer::timeout, this, [this] {
 +        m_screenshotDrag = false;       /* a hold is never the start of a drag */
-+        m_magCentre = m_magHome = m_pressPos;
 +        magnifier->toggle();
-+    });
-+    /* Tracking is switched with the state rather than left on, so the pointer
-+     * can be followed with no button down without putting a move handler in the
-+     * way of every idle frame the rest of the time. */
-+    connect(magnifier, &Magnifier::activeChanged, this, [this](bool on) {
-+        setMouseTracking(on);
-+        if (on) {
-+            /* The gesture has already put both of these on the press point, and
-+             * the pointer is the press point, so this changes nothing there. It
-+             * matters when the magnifier is switched on from a menu instead:
-+             * without it the view would open on whatever stale corner the
-+             * centre held, which for this student looks like the screen went
-+             * blank rather than like a zoom. */
-+            const QPoint here = mapFromGlobal(QCursor::pos());
-+            m_magCentre = rect().contains(here) ? QPointF(here) : QPointF(rect().center());
-+            m_magHome = m_magCentre;
-+        }
-+        update();
 +    });
 +}
 +
 +void LCDWidget::cancelHold() {
 +    m_holdTimer.stop();
-+}
-+
-+void LCDWidget::recentre(const QPointF &pos) {
-+    if (magnifier->isActive()) {
-+        m_magCentre = pos;
-+        update();
-+    }
  }
  
  void LCDWidget::paintEvent(QPaintEvent*) {
-@@ -45,6 +85,15 @@ void LCDWidget::paintEvent(QPaintEvent*) {
-     QPainter c(this);
-     const QRect &cw = c.window();
- 
-+    /* The magnifier is a view transform and nothing more: everything below draws
-+     * exactly as it would unmagnified, and the point under the pointer is left
-+     * where it was, so the drag targets keep working without a single change. */
-+    const bool magnified = magnifier->isActive();
-+    if (magnified) {
-+        c.setClipRect(cw);
-+        c.setTransform(Magnifier::transformFor(m_magCentre, cw));
-+    }
-+
-     if ((control.ports[5] & 1 << 4) && (lcd.control & 1 << 11)) {
-         QSizeF targetSize = cw.size();
-         if (isFullScreen() && m_fullscreenArea != StretchToFill) {
-@@ -92,6 +141,9 @@ void LCDWidget::paintEvent(QPaintEvent*) {
-         c.drawText(m_left, Qt::AlignCenter, tr("Archive"));
-         c.drawText(m_right, Qt::AlignCenter, tr("RAM"));
-     }
-+    if (magnified) {
-+        Magnifier::paintFrame(c, cw);
-+    }
- }
- 
- void LCDWidget::dropEvent(QDropEvent *e) {
-@@ -136,6 +188,16 @@ QImage LCDWidget::getImage() {
+@@ -136,6 +152,15 @@ QImage LCDWidget::getImage() {
  }
  
  void LCDWidget::mousePressEvent(QMouseEvent *e) {
@@ -404,12 +483,11 @@ index e5ed126..6b8b374 100644
 +         * before, holding still cancels the drag and toggles the magnifier. */
 +        m_pressPos = e->localPos();
 +        m_holdTimer.start();
-+        recentre(m_pressPos);
 +    }
      if (e->button() == Qt::LeftButton && (control.ports[5] & 1 << 4)) {
          m_screenshotDrag = true;
          e->accept();
-@@ -144,8 +206,37 @@ void LCDWidget::mousePressEvent(QMouseEvent *e) {
+@@ -144,8 +169,28 @@ void LCDWidget::mousePressEvent(QMouseEvent *e) {
      }
  }
  
@@ -425,14 +503,6 @@ index e5ed126..6b8b374 100644
 +
 +void LCDWidget::leaveEvent(QEvent *e) {
 +    cancelHold();
-+    /* Going back to where the zoom started, rather than keeping the last hover
-+     * position, is what makes "the screen stays put while you reach for a key"
-+     * true: the pointer's exit path would otherwise drag the view to whichever
-+     * edge it left by, and the student would come back to a blank margin. */
-+    if (magnifier->isActive() && m_magCentre != m_magHome) {
-+        m_magCentre = m_magHome;
-+        update();
-+    }
 +    QWidget::leaveEvent(e);
 +}
 +
@@ -443,12 +513,11 @@ index e5ed126..6b8b374 100644
 +         qAbs(e->localPos().y() - m_pressPos.y()) > Magnifier::SlopPx)) {
 +        cancelHold();       /* a drag is not a hold */
 +    }
-+    recentre(e->localPos());
 +    if (m_screenshotDrag && (e->buttons() & Qt::LeftButton))
      {
          QImage image = getImage();
          QString path = QDir::tempPath() + QDir::separator() + QStringLiteral("CEmu_screenshot_") + randomString(5) + QStringLiteral(".png");
-@@ -224,6 +315,235 @@ void LCDWidget::disableBlend() {
+@@ -224,6 +269,235 @@ void LCDWidget::disableBlend() {
      }
  }
  
@@ -684,7 +753,7 @@ index e5ed126..6b8b374 100644
  // called by the emu thread to draw the lcd
  bool LCDWidget::draw() {
      if (m_skip) {
-@@ -234,6 +554,109 @@ bool LCDWidget::draw() {
+@@ -234,6 +508,109 @@ bool LCDWidget::draw() {
          m_mutex.lock();
          m_blendedFrame.swap(m_renderedFrame);
          emu_lcd_drawframe(m_renderedFrame.bits());
@@ -795,7 +864,7 @@ index e5ed126..6b8b374 100644
              QPainter c(&m_renderedFrame);
              c.fillRect(c.window(), QColor(0, 0, 0, (1.0f - backlight.factor) * 255.0f));
 diff --git a/gui/qt/lcdwidget.h b/gui/qt/lcdwidget.h
-index 6629c39..eb27607 100644
+index 6629c39..9f264e4 100644
 --- a/gui/qt/lcdwidget.h
 +++ b/gui/qt/lcdwidget.h
 @@ -4,6 +4,7 @@
@@ -827,7 +896,7 @@ index 6629c39..eb27607 100644
      void disableBlend();
  
  signals:
-@@ -48,11 +56,18 @@ protected:
+@@ -48,11 +56,17 @@ protected:
      virtual void dragMoveEvent(QDragMoveEvent*) Q_DECL_OVERRIDE;
      virtual void mousePressEvent(QMouseEvent*) Q_DECL_OVERRIDE;
      virtual void mouseMoveEvent(QMouseEvent*) Q_DECL_OVERRIDE;
@@ -841,21 +910,18 @@ index 6629c39..eb27607 100644
 +    void buildPaletteLut();
 +    void buildStatusLut();
 +    void cancelHold();
-+    void recentre(const QPointF &pos);
 +
      enum {
          LcdLeft = 0,
          LcdRight
-@@ -80,8 +95,18 @@ private:
+@@ -80,8 +94,16 @@ private:
      int m_skip = 0;
      int m_frameskip = 0;
  
 +    /* the press-and-hold magnifier gesture; see magnifier.h for why it lives
-+     * on the screen and not on the keypad */
++     * on the screen even though it is the keypad that zooms */
 +    QTimer m_holdTimer;
 +    QPointF m_pressPos;
-+    QPointF m_magCentre;
-+    QPointF m_magHome;
 +
      enum UpscaleMethod m_upscale = SharpBilinear;
      enum FullscreenArea m_fullscreenArea = PreserveAspectRatio;
@@ -932,10 +998,10 @@ index 0000000..4d979c2
 +}
 diff --git a/gui/qt/magnifier.h b/gui/qt/magnifier.h
 new file mode 100644
-index 0000000..180e3ab
+index 0000000..b5bb477
 --- /dev/null
 +++ b/gui/qt/magnifier.h
-@@ -0,0 +1,68 @@
+@@ -0,0 +1,70 @@
 +#ifndef MAGNIFIER_H
 +#define MAGNIFIER_H
 +
@@ -951,16 +1017,18 @@ index 0000000..180e3ab
 +/* Press-and-hold magnifier, for a student who reads this calculator at up to
 + * 10x and needs to look closely at one part of it without resizing the window.
 + *
-+ * There is ONE shared instance rather than one per widget, because the
-+ * calculator is a single object to the person using it: a long press on the
-+ * screen magnifies the screen and the keypad together. The gesture lives on the
-+ * LCD alone and deliberately not on the keypad. CEmu delivers real press and
-+ * release events to the emulated hardware, so holding a key repeats it exactly
-+ * as a physical TI-84 does; a long press on the keypad would have to take that
-+ * away, and the user chose key repeat over a second place to start the zoom.
++ * It magnifies the KEYPAD and nothing else. The screen deliberately does not
++ * zoom: it already has two controls of its own -- it grows with the window
++ * (issue 3) and it can be pulled out into a window the size of the display
++ * (issue 2) -- and zooming it on top of that only crops away the line being
++ * read. The keys have no such control; they get whatever room is left after the
++ * screen has taken its share, so the zoom is theirs.
 + *
-+ * Each host widget keeps its own centre, so the screen stays parked on whatever
-+ * was being read while the pointer moves down to the keypad.
++ * The gesture is a long press on the SCREEN, and deliberately not on the keypad.
++ * CEmu delivers real press and release events to the emulated hardware, so
++ * holding a key repeats it exactly as a physical TI-84 does; a long press on the
++ * keypad would have to take that away. Starting it from the screen also means
++ * the hand is never over the thing that is about to change size.
 + */
 +class Magnifier : public QObject {
 +    Q_OBJECT
@@ -1005,7 +1073,7 @@ index 0000000..180e3ab
 +
 +#endif
 diff --git a/gui/qt/mainwindow.cpp b/gui/qt/mainwindow.cpp
-index 11907c2..320b73b 100644
+index 11907c2..9e41337 100644
 --- a/gui/qt/mainwindow.cpp
 +++ b/gui/qt/mainwindow.cpp
 @@ -1,4 +1,5 @@
@@ -1022,7 +1090,7 @@ index 11907c2..320b73b 100644
  
      // setup translations
      if (m_appTranslator.load(QLocale::system().name(), QStringLiteral(":/i18n/i18n/"))) {
-@@ -378,6 +380,48 @@ MainWindow::MainWindow(CEmuOpts &cliOpts, QWidget *p) : QMainWindow(p), ui(new U
+@@ -378,6 +380,49 @@ MainWindow::MainWindow(CEmuOpts &cliOpts, QWidget *p) : QMainWindow(p), ui(new U
      connect(ui->scaleLCD, static_cast<void (QSpinBox::*)(int)>(&QSpinBox::valueChanged), this, &MainWindow::setLcdScale);
      connect(ui->upscaleLCD, static_cast<void (QComboBox::*)(int)>(&QComboBox::currentIndexChanged), this, &MainWindow::setLcdUpscale);
      connect(ui->fullscreenLCD, static_cast<void (QComboBox::*)(int)>(&QComboBox::currentIndexChanged), this, &MainWindow::setLcdFullscreen);
@@ -1032,8 +1100,9 @@ index 11907c2..320b73b 100644
 +     * whole point of it -- but whoever sets this machine up for the student has
 +     * to be able to find the feature at all, and needs a way to switch it off
 +     * that does not depend on knowing the gesture. Extras is where CEmu keeps
-+     * its other view toggles. */
-+    QAction *actionMagnifier = ui->menuExtras->addAction(tr("Magnifier"));
++     * its other view toggles. Named for what it zooms, since the gesture starts
++     * on the screen and the screen is not what grows. */
++    QAction *actionMagnifier = ui->menuExtras->addAction(tr("Magnify Keypad"));
 +    actionMagnifier->setCheckable(true);
 +    connect(actionMagnifier, &QAction::triggered, this, []{ magnifier->toggle(); });
 +    connect(magnifier, &Magnifier::activeChanged, actionMagnifier, &QAction::setChecked);
@@ -1071,7 +1140,7 @@ index 11907c2..320b73b 100644
      connect(ui->guiSkip, static_cast<void (QSpinBox::*)(int)>(&QSpinBox::valueChanged), this, &MainWindow::setGuiSkip);
      connect(ui->checkSkin, &QCheckBox::stateChanged, this, &MainWindow::setSkinToggle);
      connect(ui->comboBoxAsicRev, static_cast<void (QComboBox::*)(int)>(&QComboBox::currentIndexChanged), this, &MainWindow::setAsicRevision);
-@@ -584,9 +628,11 @@ MainWindow::MainWindow(CEmuOpts &cliOpts, QWidget *p) : QMainWindow(p), ui(new U
+@@ -584,9 +629,11 @@ MainWindow::MainWindow(CEmuOpts &cliOpts, QWidget *p) : QMainWindow(p), ui(new U
      setFrameskip(m_config->value(SETTING_CAPTURE_FRAMESKIP, 1).toInt());
      setOptimizeRecord(m_config->value(SETTING_CAPTURE_OPTIMIZE, true).toBool());
      setStatusInterval(m_config->value(SETTING_STATUS_INTERVAL, 1).toInt());
@@ -1083,7 +1152,7 @@ index 11907c2..320b73b 100644
      setSkinToggle(m_config->value(SETTING_SCREEN_SKIN, true).toBool());
      setLcdDma(m_config->value(SETTING_SCREEN_DMA, true).toBool());
      setLcdGamma(m_config->value(SETTING_SCREEN_GAMMA, true).toBool());
-@@ -1009,6 +1055,15 @@ void MainWindow::raiseContainingDock(QWidget *widget) {
+@@ -1009,6 +1056,15 @@ void MainWindow::raiseContainingDock(QWidget *widget) {
      }
  }
  
@@ -1099,7 +1168,7 @@ index 11907c2..320b73b 100644
  void MainWindow::mouseDoubleClickEvent(QMouseEvent *event) {
      if (!childAt(event->pos())) {
          int sep = style()->pixelMetric(QStyle::PM_DockWidgetSeparatorExtent, Q_NULLPTR, this);
-@@ -1054,6 +1109,10 @@ void MainWindow::setup() {
+@@ -1054,6 +1110,10 @@ void MainWindow::setup() {
      }
  
      setUIEditMode(m_uiEditMode);
@@ -1110,7 +1179,7 @@ index 11907c2..320b73b 100644
  
      stateLoadInfo();
      recentLoadInfo();
-@@ -1414,6 +1473,15 @@ void MainWindow::closeEvent(QCloseEvent *e) {
+@@ -1414,6 +1474,15 @@ void MainWindow::closeEvent(QCloseEvent *e) {
          }
      }
  
@@ -1126,7 +1195,7 @@ index 11907c2..320b73b 100644
      emu.stop();
      QMainWindow::closeEvent(e);
  }
-@@ -1859,6 +1927,30 @@ void MainWindow::contextLcd(const QPoint &posa) {
+@@ -1859,6 +1928,30 @@ void MainWindow::contextLcd(const QPoint &posa) {
      menu.addMenu(ui->menuCapture);
      menu.addMenu(m_menuDocks);
      menu.addMenu(ui->menuExtras);
@@ -1143,7 +1212,7 @@ index 11907c2..320b73b 100644
 +        connect(entry, &QAction::triggered, this, [this, i]{ setLcdPalette(i); });
 +    }
 +
-+    QAction *magnify = menu.addAction(tr("Magnifier"));
++    QAction *magnify = menu.addAction(tr("Magnify Keypad"));
 +    magnify->setCheckable(true);
 +    magnify->setChecked(magnifier->isActive());
 +    connect(magnify, &QAction::triggered, this, []{ magnifier->toggle(); });
