@@ -74,6 +74,7 @@ and keep the real TI-84 Plus CE shape.
 This screen is not tall enough to make it much bigger than it
 already is. For a genuinely big screen use:
 
+    Extras > Detach Screen   (see DETACHED SCREEN below), or
     Big Calculator Screen.app
 
 If the window ever looks wrong, double-click:
@@ -82,6 +83,50 @@ If the window ever looks wrong, double-click:
 
 which puts it back to the standard size.
 
+
+----------------------------------------------------------------
+  DETACHED SCREEN  --  the screen in its own window
+----------------------------------------------------------------
+
+The calculator screen can be taken OUT into a window of its own,
+so it can be made as big as you like while the keys stay where
+they are.
+
+TO TAKE IT OUT:
+
+    Extras > Detach Screen
+
+    or right-click on the calculator screen and choose
+    Detach Screen
+
+The screen gets its own window, titled "Screen". The keys keep
+the main window to themselves.
+
+NOW DRAG ANY EDGE OR CORNER of the Screen window. The calculator
+screen grows and shrinks with it, as big as your display allows.
+It remembers the size and position, including after you quit.
+
+TO PUT IT BACK, any one of these:
+
+    click the red close button on the Screen window
+    Extras > Detach Screen  again
+    right-click the screen and choose Detach Screen again
+
+The Screen window STAYS ON SCREEN when you click into another
+program. You do not have to switch back to the calculator to
+see it.
+
+HOW THIS IS DIFFERENT FROM "BIG CALCULATOR SCREEN":
+
+    Detach Screen           screen window + keys window.
+                            You can still use the on-screen keys,
+                            and you choose the size.
+
+    Big Calculator Screen   screen only, filling the whole
+                            display, no keys. Type on the Mac
+                            keyboard.
+
+Use whichever suits the moment. Both keep your work.
 
 ----------------------------------------------------------------
   MAGNIFIER  --  a close-up look
@@ -169,3 +214,8 @@ In the menu bar at the top:  Docks
 
 Leave "Enable UI edit mode" switched OFF. With it off the panels
 are locked together and cannot be pulled apart by accident.
+
+If the screen ends up in a window of its own and you want it
+back in one piece, you do not need this menu at all -- use
+Extras > Detach Screen, or the red close button on the Screen
+window. See DETACHED SCREEN above.

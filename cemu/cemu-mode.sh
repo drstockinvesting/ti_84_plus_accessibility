@@ -21,7 +21,9 @@ CFG="$HOME/Library/Preferences/cemu-dev/CEmu/cemu_config.ini"
 # Falls back to the stock App Store/prebuilt CEmu if the build is not installed.
 APP="$HOME/Documents/CEmu/CEmu Accessible.app"
 [ -d "$APP" ] || APP="/Applications/CEmu.app"
-PROC="MacOS/CEmu"
+# -x matches the process NAME exactly; pgrep -f would also match any shell command
+# line that merely mentions the path.
+PROC="CEmu"
 
 [ -f "$CFG" ] || { echo "No CEmu config at $CFG" >&2; exit 1; }
 [ -d "$APP" ] || { echo "CEmu not found at $APP" >&2; exit 1; }
@@ -50,22 +52,34 @@ esac
 # still holding the config open, so always wait on the real process, not on who asked.
 wait_gone() {
   for _ in $(seq 1 40); do
-    pgrep -f "$PROC" >/dev/null || return 0
+    pgrep -x "$PROC" >/dev/null || return 0
     sleep 0.5
   done
   return 1
 }
 
-if pgrep -f "$PROC" >/dev/null; then
-  osascript -e 'tell application id "com.yourcompany.CEmu" to quit' >/dev/null 2>&1 || true
-  # Deliberately NO pkill fallback: SIGTERM was tested and CEmu writes neither its
-  # config nor cemu_image.ce on it, so force-killing would throw away the student's
-  # in-progress work. Failing to switch modes is the better outcome.
-  wait_gone || {
-    echo "CEmu did not quit (it may be showing a dialog). Nothing was changed." >&2
-    exit 1
-  }
-fi
+# CEmu's quit is asynchronous: closeEvent() starts the calculator-image save and
+# ignores the close, and only the save finishing calls close() again. One Apple Event
+# can therefore come back "User canceled" with nothing else happening, so re-send it
+# while waiting. Deliberately NO pkill fallback: SIGTERM was tested and CEmu writes
+# neither its config nor cemu_image.ce on it, so force-killing would throw away the
+# student's in-progress work. Failing to switch modes is the better outcome.
+quit_cemu() {
+  for _ in $(seq 1 10); do
+    pgrep -x "$PROC" >/dev/null || return 0
+    osascript -e 'tell application id "com.yourcompany.CEmu" to quit' >/dev/null 2>&1 || true
+    for _ in $(seq 1 8); do
+      pgrep -x "$PROC" >/dev/null || return 0
+      sleep 0.5
+    done
+  done
+  return 1
+}
+
+quit_cemu || {
+  echo "CEmu did not quit (it may be showing a dialog). Nothing was changed." >&2
+  exit 1
+}
 wait_gone || { echo "CEmu still running; not touching the config." >&2; exit 1; }
 # Let the dying process finish releasing the config and its LaunchServices registration,
 # otherwise the relaunch below can be swallowed by the instance that is still exiting.
@@ -99,12 +113,12 @@ open "$APP"
 
 # Confirm it actually came up; one retry covers a launch swallowed by the old instance.
 for _ in $(seq 1 16); do
-  pgrep -f "$PROC" >/dev/null && exit 0
+  pgrep -x "$PROC" >/dev/null && exit 0
   sleep 0.5
 done
 open "$APP"
 for _ in $(seq 1 16); do
-  pgrep -f "$PROC" >/dev/null && exit 0
+  pgrep -x "$PROC" >/dev/null && exit 0
   sleep 0.5
 done
 echo "CEmu did not relaunch." >&2

@@ -10,6 +10,114 @@ index 2b3f165..c9a166f 100644
      main.cpp
      mainwindow.cpp mainwindow.h mainwindow.ui
      memorywidget.cpp
+diff --git a/gui/qt/debugger.cpp b/gui/qt/debugger.cpp
+index 9c047f1..51c4b14 100644
+--- a/gui/qt/debugger.cpp
++++ b/gui/qt/debugger.cpp
+@@ -2097,6 +2097,14 @@ void MainWindow::handleCtrlClickLine(QLineEdit *edit) {
+ // ------------------------------------------------
+ 
+ bool MainWindow::eventFilter(QObject *obj, QEvent *e) {
++    /* Issue 2: a floating dock resizes outside the main window, so MainWindow's own
++     * resizeEvent never sees it. This is what makes the detached screen actually
++     * scale when it is dragged bigger. */
++    if (obj == ui->screenDock && e->type() == QEvent::Resize &&
++        m_screenDetached && m_setup && !m_scaling) {
++        QTimer::singleShot(0, this, &MainWindow::scaleToWindow);
++    }
++
+     if (!guiDebug) {
+         return QMainWindow::eventFilter(obj, e);
+     }
+diff --git a/gui/qt/dockwidget.cpp b/gui/qt/dockwidget.cpp
+index 4e78552..b99553b 100644
+--- a/gui/qt/dockwidget.cpp
++++ b/gui/qt/dockwidget.cpp
+@@ -22,6 +22,7 @@ DockWidget::DockWidget(QWidget *parent)
+     // set a dummy layout as we do below.
+     m_titleHide->setLayout(new QStackedLayout{m_titleHide});
+     m_closeablefloat = false;
++    m_realwindow = false;
+ }
+ 
+ DockWidget::DockWidget(const QString &title, QWidget *parent) : DockWidget{parent} {
+@@ -62,6 +63,25 @@ void DockWidget::setState(bool edit) {
+     }
+     setFeatures(features);
+     setTitleBarWidget(isFloating() || edit ? Q_NULLPTR : m_titleHide);
++
++    // Qt floats a dock as a Qt::Tool window, and macOS hides tool windows whenever
++    // their application is not the active one. Right for a palette; wrong for the
++    // calculator's detached screen (issue 2), which is the thing the student is
++    // reading -- it would disappear the moment they clicked a browser.
++    //
++    // This has to live here rather than at the call site because setFeatures() above
++    // re-derives the flags for a floating dock, so any caller that sets them first
++    // has them thrown away -- which is exactly what setup()'s trailing
++    // setUIDockEditMode() was doing on every launch that started out detached.
++    if (m_realwindow && isFloating()) {
++        const bool shown = !isHidden();
++        setWindowFlags(Qt::Window | Qt::CustomizeWindowHint | Qt::WindowTitleHint |
++                       Qt::WindowMinimizeButtonHint | Qt::WindowMaximizeButtonHint |
++                       Qt::WindowCloseButtonHint);
++        if (shown) {
++            show();     /* setWindowFlags() hides the window */
++        }
++    }
+ }
+ 
+ bool DockWidget::event(QEvent *event) {
+@@ -123,12 +143,24 @@ void DockWidget::makeCloseableFloat(bool state) {
+     m_closeablefloat = state;
+ }
+ 
++void DockWidget::makeRealWindow(bool state) {
++    m_realwindow = state;
++}
++
+ void DockWidget::closeEvent(QCloseEvent *event) {
+-    setFloating(true);
+-    setGeometry(QStyle::alignedRect(Qt::LeftToRight,
+-                                    Qt::AlignCenter,
+-                                    minimumSize(),
+-                                    qApp->screens().first()->availableGeometry()));
++    // Float and re-centre only a dock that was docked -- that is what this is for,
++    // so a dock closed from the layout reappears somewhere findable. One that is
++    // already floating has a position and a size the user chose, and shrinking it to
++    // minimumSize() throws them away. That happened on every quit, because closing
++    // the application closes all its windows, so the detached screen (issue 2) came
++    // back tiny each time.
++    if (!isFloating()) {
++        setFloating(true);
++        setGeometry(QStyle::alignedRect(Qt::LeftToRight,
++                                        Qt::AlignCenter,
++                                        minimumSize(),
++                                        qApp->screens().first()->availableGeometry()));
++    }
+     emit closed();
+     event->accept();
+     QDockWidget::closeEvent(event);
+diff --git a/gui/qt/dockwidget.h b/gui/qt/dockwidget.h
+index c1f7958..ef3f6cc 100644
+--- a/gui/qt/dockwidget.h
++++ b/gui/qt/dockwidget.h
+@@ -17,6 +17,7 @@ public:
+     DockWidget(QTabWidget *tabs, QWidget *parent = Q_NULLPTR);
+     DockWidget(const QString &title, QWidget *parent = Q_NULLPTR);
+     void makeCloseableFloat(bool state);
++    void makeRealWindow(bool state);
+     void setState(bool visible);
+     bool isClosable() const { return m_closable; }
+     void setClosable(bool closable) { m_closable = closable; }
+@@ -36,7 +37,7 @@ protected:
+ private:
+     QWidget *m_titleHide;
+     DockWidget *m_tabs;
+-    bool m_closable : 1, m_expandable : 1, m_closeablefloat : 1;
++    bool m_closable : 1, m_expandable : 1, m_closeablefloat : 1, m_realwindow : 1;
+ };
+ 
+ #endif
 diff --git a/gui/qt/keypad/keypadwidget.cpp b/gui/qt/keypad/keypadwidget.cpp
 index 34d7e6d..22727ed 100644
 --- a/gui/qt/keypad/keypadwidget.cpp
@@ -897,7 +1005,7 @@ index 0000000..180e3ab
 +
 +#endif
 diff --git a/gui/qt/mainwindow.cpp b/gui/qt/mainwindow.cpp
-index 11907c2..064ec4d 100644
+index 11907c2..320b73b 100644
 --- a/gui/qt/mainwindow.cpp
 +++ b/gui/qt/mainwindow.cpp
 @@ -1,4 +1,5 @@
@@ -914,7 +1022,7 @@ index 11907c2..064ec4d 100644
  
      // setup translations
      if (m_appTranslator.load(QLocale::system().name(), QStringLiteral(":/i18n/i18n/"))) {
-@@ -378,6 +380,17 @@ MainWindow::MainWindow(CEmuOpts &cliOpts, QWidget *p) : QMainWindow(p), ui(new U
+@@ -378,6 +380,48 @@ MainWindow::MainWindow(CEmuOpts &cliOpts, QWidget *p) : QMainWindow(p), ui(new U
      connect(ui->scaleLCD, static_cast<void (QSpinBox::*)(int)>(&QSpinBox::valueChanged), this, &MainWindow::setLcdScale);
      connect(ui->upscaleLCD, static_cast<void (QComboBox::*)(int)>(&QComboBox::currentIndexChanged), this, &MainWindow::setLcdUpscale);
      connect(ui->fullscreenLCD, static_cast<void (QComboBox::*)(int)>(&QComboBox::currentIndexChanged), this, &MainWindow::setLcdFullscreen);
@@ -929,10 +1037,41 @@ index 11907c2..064ec4d 100644
 +    actionMagnifier->setCheckable(true);
 +    connect(actionMagnifier, &QAction::triggered, this, []{ magnifier->toggle(); });
 +    connect(magnifier, &Magnifier::activeChanged, actionMagnifier, &QAction::setChecked);
++
++    /* Issue 2: the screen goes out into its own resizable window and comes back,
++     * by command rather than by dragging. See setScreenDetached(). */
++    m_actionDetachScreen = ui->menuExtras->addAction(tr("Detach Screen"));
++    m_actionDetachScreen->setCheckable(true);
++    connect(m_actionDetachScreen, &QAction::triggered, this, &MainWindow::setScreenDetached);
++    /* A drag can still float it while UI edit mode is on, so follow the dock rather
++     * than assume the menu is the only way it ever moves. */
++    connect(ui->screenDock, &QDockWidget::topLevelChanged, this, [this](bool floating) {
++        if (m_setup && floating != m_screenDetached) {
++            setScreenDetached(floating);
++        }
++    });
++    ui->screenDock->installEventFilter(this);
++    /* The detached screen is a real window, so it has a close button. Closing it
++     * should put the calculator back together, not make the screen vanish with no
++     * obvious way back -- which is the whole complaint behind issue 2. */
++    connect(ui->screenDock, &DockWidget::closed, this, [this] {
++        if (!m_setup || !m_screenDetached) {
++            return;
++        }
++        /* Deferred, and the shutdown test made when it fires rather than here:
++         * quitting closes every window, and the dock's window goes first, before
++         * MainWindow::closeEvent has set m_shutdown. Testing it now would put the
++         * calculator back together in the middle of a quit -- and eat the quit. */
++        QTimer::singleShot(0, this, [this] {
++            if (!m_shutdown && m_screenDetached) {
++                setScreenDetached(false);
++            }
++        });
++    });
      connect(ui->guiSkip, static_cast<void (QSpinBox::*)(int)>(&QSpinBox::valueChanged), this, &MainWindow::setGuiSkip);
      connect(ui->checkSkin, &QCheckBox::stateChanged, this, &MainWindow::setSkinToggle);
      connect(ui->comboBoxAsicRev, static_cast<void (QComboBox::*)(int)>(&QComboBox::currentIndexChanged), this, &MainWindow::setAsicRevision);
-@@ -584,9 +597,11 @@ MainWindow::MainWindow(CEmuOpts &cliOpts, QWidget *p) : QMainWindow(p), ui(new U
+@@ -584,9 +628,11 @@ MainWindow::MainWindow(CEmuOpts &cliOpts, QWidget *p) : QMainWindow(p), ui(new U
      setFrameskip(m_config->value(SETTING_CAPTURE_FRAMESKIP, 1).toInt());
      setOptimizeRecord(m_config->value(SETTING_CAPTURE_OPTIMIZE, true).toBool());
      setStatusInterval(m_config->value(SETTING_STATUS_INTERVAL, 1).toInt());
@@ -944,7 +1083,7 @@ index 11907c2..064ec4d 100644
      setSkinToggle(m_config->value(SETTING_SCREEN_SKIN, true).toBool());
      setLcdDma(m_config->value(SETTING_SCREEN_DMA, true).toBool());
      setLcdGamma(m_config->value(SETTING_SCREEN_GAMMA, true).toBool());
-@@ -1009,6 +1024,15 @@ void MainWindow::raiseContainingDock(QWidget *widget) {
+@@ -1009,6 +1055,15 @@ void MainWindow::raiseContainingDock(QWidget *widget) {
      }
  }
  
@@ -960,15 +1099,34 @@ index 11907c2..064ec4d 100644
  void MainWindow::mouseDoubleClickEvent(QMouseEvent *event) {
      if (!childAt(event->pos())) {
          int sep = style()->pixelMetric(QStyle::PM_DockWidgetSeparatorExtent, Q_NULLPTR, this);
-@@ -1054,6 +1078,7 @@ void MainWindow::setup() {
+@@ -1054,6 +1109,10 @@ void MainWindow::setup() {
      }
  
      setUIEditMode(m_uiEditMode);
++    // The saved window state already carries whether the screen was floating; this
++    // just brings the rest of the build into line with it (issue 2).
++    setScreenDetached(ui->screenDock->isFloating());
 +    QTimer::singleShot(0, this, &MainWindow::scaleToWindow);
  
      stateLoadInfo();
      recentLoadInfo();
-@@ -1859,6 +1884,24 @@ void MainWindow::contextLcd(const QPoint &posa) {
+@@ -1414,6 +1473,15 @@ void MainWindow::closeEvent(QCloseEvent *e) {
+         }
+     }
+ 
++    // Issue 2: detached, the screen is a top-level window in its own right, and
++    // saveSettings() above has already recorded that. Leaving it up once the main
++    // window has gone keeps the application alive with nothing but a screen -- which
++    // is also why an AppleScript "quit" came back as "User canceled" while detached,
++    // and the launcher scripts depend on that quit working.
++    if (ui->screenDock->isFloating()) {
++        ui->screenDock->hide();
++    }
++
+     emu.stop();
+     QMainWindow::closeEvent(e);
+ }
+@@ -1859,6 +1927,30 @@ void MainWindow::contextLcd(const QPoint &posa) {
      menu.addMenu(ui->menuCapture);
      menu.addMenu(m_menuDocks);
      menu.addMenu(ui->menuExtras);
@@ -990,11 +1148,17 @@ index 11907c2..064ec4d 100644
 +    magnify->setChecked(magnifier->isActive());
 +    connect(magnify, &QAction::triggered, this, []{ magnifier->toggle(); });
 +
++    /* Detached with the menu bar hidden, this is the only way back. */
++    QAction *detach = menu.addAction(tr("Detach Screen"));
++    detach->setCheckable(true);
++    detach->setChecked(m_screenDetached);
++    connect(detach, &QAction::triggered, this, &MainWindow::setScreenDetached);
++
      menu.exec(globalPos);
  }
  
 diff --git a/gui/qt/mainwindow.h b/gui/qt/mainwindow.h
-index 9b67949..c7e4ecd 100644
+index 9b67949..f6afe12 100644
 --- a/gui/qt/mainwindow.h
 +++ b/gui/qt/mainwindow.h
 @@ -68,6 +68,7 @@ protected:
@@ -1005,17 +1169,18 @@ index 9b67949..c7e4ecd 100644
      virtual void mouseDoubleClickEvent(QMouseEvent *event) Q_DECL_OVERRIDE;
      virtual void dropEvent(QDropEvent *event) Q_DECL_OVERRIDE;
      virtual void dragEnterEvent(QDragEnterEvent *event) Q_DECL_OVERRIDE;
-@@ -413,7 +414,9 @@ private:
+@@ -413,7 +414,10 @@ private:
      void setSkinToggle(bool state);
      void setGuiSkip(int value);
      void setLcdScale(int value);
 +    void scaleToWindow();
++    void setScreenDetached(bool detached);
      void setLcdUpscale(int value);
 +    void setLcdPalette(int value);
      void setLcdFullscreen(int value);
      void setLcdDma(bool state);
      void setLcdGamma(bool state);
-@@ -688,6 +691,10 @@ private:
+@@ -688,6 +692,14 @@ private:
      bool m_allowAnyRev;
      bool m_normalOs;
      bool m_setup = false;
@@ -1023,14 +1188,21 @@ index 9b67949..c7e4ecd 100644
 +    // fixed-size screen and an aspect-locked keypad to drift apart.
 +    bool m_scaleWithWindow = true;
 +    bool m_scaling = false;
++    // issue 2: the screen can be put out into its own resizable window, and -- the
++    // part CEmu has no control for -- brought back again.
++    bool m_screenDetached = false;
++    QAction *m_actionDetachScreen = Q_NULLPTR;
      int m_fullscreen = FULLSCREEN_NONE;
      uint32_t m_runUntilAddr;
  
-@@ -742,7 +749,9 @@ private:
+@@ -742,7 +754,12 @@ private:
      static const QString SETTING_PYTHON_EDITION;
      static const QString SETTING_SCREEN_FRAMESKIP;
      static const QString SETTING_SCREEN_SCALE;
 +    static const QString SETTING_SCREEN_SCALE_WITH_WINDOW;
++    static const QString SETTING_SCREEN_DETACHED;
++    static const QString SETTING_SCREEN_DETACHED_GEOMETRY;
++    static const QString SETTING_WINDOW_ATTACHED_HEIGHT;
      static const QString SETTING_SCREEN_UPSCALE;
 +    static const QString SETTING_SCREEN_PALETTE;
      static const QString SETTING_SCREEN_FULLSCREEN;
@@ -1077,20 +1249,23 @@ index 6430641..afb482a 100644
               </widget>
              </item>
 diff --git a/gui/qt/settings.cpp b/gui/qt/settings.cpp
-index 646a33b..c0cc57a 100644
+index 646a33b..576a361 100644
 --- a/gui/qt/settings.cpp
 +++ b/gui/qt/settings.cpp
-@@ -56,7 +56,9 @@ const QString MainWindow::SETTING_DEBUGGER_NORM_OS          = QStringLiteral("De
+@@ -56,7 +56,12 @@ const QString MainWindow::SETTING_DEBUGGER_NORM_OS          = QStringLiteral("De
  const QString MainWindow::SETTING_PYTHON_EDITION            = QStringLiteral("python_edition");
  const QString MainWindow::SETTING_SCREEN_FRAMESKIP          = QStringLiteral("Screen/frameskip");
  const QString MainWindow::SETTING_SCREEN_SCALE              = QStringLiteral("Screen/scale");
 +const QString MainWindow::SETTING_SCREEN_SCALE_WITH_WINDOW  = QStringLiteral("Screen/scale_with_window");
++const QString MainWindow::SETTING_SCREEN_DETACHED           = QStringLiteral("Screen/detached");
++const QString MainWindow::SETTING_SCREEN_DETACHED_GEOMETRY  = QStringLiteral("Screen/detached_geometry");
++const QString MainWindow::SETTING_WINDOW_ATTACHED_HEIGHT    = QStringLiteral("Window/attached_height");
  const QString MainWindow::SETTING_SCREEN_UPSCALE            = QStringLiteral("Screen/upscale");
 +const QString MainWindow::SETTING_SCREEN_PALETTE            = QStringLiteral("Screen/palette");
  const QString MainWindow::SETTING_SCREEN_FULLSCREEN         = QStringLiteral("Screen/fullscreen");
  const QString MainWindow::SETTING_SCREEN_SKIN               = QStringLiteral("Screen/skin");
  const QString MainWindow::SETTING_SCREEN_DMA                = QStringLiteral("Screen/dma");
-@@ -724,13 +726,20 @@ void MainWindow::lcdAdjust() {
+@@ -724,13 +729,43 @@ void MainWindow::lcdAdjust() {
      w = LCD_WIDTH * scale;
      h = LCD_HEIGHT * scale;
      ui->lcd->setFixedSize(w, h);
@@ -1099,21 +1274,44 @@ index 646a33b..c0cc57a 100644
          w = 440 * scale;
          h = 351 * scale;
      }
-+    // Height is what the dock layout must honour; the width is left free so that a
-+    // window wider than the calculator letterboxes symmetrically rather than pinning
-+    // the faceplate to the left edge while the keypad sits centred (issue 3).
-+    ui->screenWidget->setMinimumWidth(qRound(w));
-+    ui->screenWidget->setMaximumWidth(QWIDGETSIZE_MAX);
-+    ui->screenWidget->setFixedHeight(qRound(h));
++    // Docked, height is what the dock layout must honour; the width is left free so
++    // that a window wider than the calculator letterboxes symmetrically rather than
++    // pinning the faceplate to the left edge while the keypad sits centred (issue 3).
++    //
++    // Detached (issue 2) nothing may be pinned at all: a minimum is a floor the user
++    // cannot drag the floating window below, and a fixed height is a ceiling it
++    // cannot be dragged above, so pinning either one would hand back a "resizable"
++    // window that does not resize. The size leads and the scale follows it, in
++    // scaleToWindow(); here the artwork is simply centred in whatever it is given.
++    if (m_screenDetached) {
++        // A floor, not the current size: 25% of the artwork. Zero would let the
++        // floating window collapse to nothing, since the widget lays its children
++        // out by hand and so has no size hint of its own to stop it.
++        ui->screenWidget->setMinimumSize(110, 88);
++        ui->screenWidget->setMaximumSize(QWIDGETSIZE_MAX, QWIDGETSIZE_MAX);
++        // ...and the vertical policy has to be Preferred, not the Maximum that
++        // DockWidget::updateExpandability() gives a dock marked not expandable.
++        // Maximum means "the hint is a ceiling", which is right docked -- it is what
++        // stops the screen stealing the keypad's height -- and is exactly why the
++        // floating window would widen but refuse to grow taller.
++        ui->screenWidget->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Preferred);
++    } else {
++        ui->screenWidget->setMinimumWidth(qRound(w));
++        ui->screenWidget->setMaximumWidth(QWIDGETSIZE_MAX);
++        ui->screenWidget->setFixedHeight(qRound(h));
++    }
 +    const int xoff = qMax(0, qRound((ui->screenWidget->width() - w) / 2.0f));
-+    ui->calcSkinTop->move(xoff, 0);
++    const int yoff = m_screenDetached
++                   ? qMax(0, qRound((ui->screenWidget->height() - h) / 2.0f)) : 0;
++    ui->calcSkinTop->move(xoff, yoff);
      ui->calcSkinTop->resize(w, h);
 -    ui->screenWidget->setFixedSize(w, h);
-+    ui->lcd->move(xoff + (skin ? qRound(60 * scale) : 0), skin ? qRound(78 * scale) : 0);
++    ui->lcd->move(xoff + (skin ? qRound(60 * scale) : 0),
++                  yoff + (skin ? qRound(78 * scale) : 0));
  }
  
  void MainWindow::setLcdScale(int scale) {
-@@ -740,12 +749,74 @@ void MainWindow::setLcdScale(int scale) {
+@@ -740,12 +775,190 @@ void MainWindow::setLcdScale(int scale) {
      lcdAdjust();
  }
  
@@ -1136,6 +1334,31 @@ index 646a33b..c0cc57a 100644
 +    if (!keypadDock || !ui->screenDock->isVisible() || !keypadDock->isVisible()) {
 +        return;
 +    }
++
++    // Issue 2: detached, there is no stack to keep aligned -- the screen is its own
++    // window and the keypad has the main window to itself. The screen scale then
++    // comes from the floating window alone, which is what makes it resizable; the
++    // keypad needs no scale at all, since it is vector-drawn and fits itself.
++    if (m_screenDetached && ui->screenDock->isFloating()) {
++        const int availW = ui->screenWidget->width(), availH = ui->screenWidget->height();
++        if (availW <= 0 || availH <= 0) {
++            return;
++        }
++        int pct = static_cast<int>(qMin(availW / 440.0, availH / 351.0) * 100.0);
++        pct = qBound(25, pct, 800);   /* matches the floor lcdAdjust() sets */
++        if (pct == ui->scaleLCD->value()) {
++            return;
++        }
++        m_scaling = true;
++        ui->scaleLCD->blockSignals(true);
++        ui->scaleLCD->setValue(pct);
++        ui->scaleLCD->blockSignals(false);
++        m_config->setValue(SETTING_SCREEN_SCALE, pct);
++        lcdAdjust();
++        m_scaling = false;
++        return;
++    }
++
 +    if (ui->screenDock->isFloating() || keypadDock->isFloating()) {
 +        return;
 +    }
@@ -1173,6 +1396,97 @@ index 646a33b..c0cc57a 100644
 +    m_scaling = false;
 +}
 +
++// Issue 2. CEmu can float the screen dock, but only by dragging it, and only while
++// UI edit mode is on -- which is exactly the mode this build keeps off so that the
++// student cannot pull the calculator apart by accident. Worse, DockWidget::setState()
++// sets NoDockWidgetArea whenever edit mode is off, so a screen that is already out
++// can never be dropped back in. That is the "no way to attach it" in the report.
++//
++// The answer is a command rather than a gesture: one menu entry, in Extras and in the
++// screen's own right-click menu, that puts the screen out and brings it back. The
++// right-click menu matters more than it looks -- detached, with the menu bar hidden,
++// it is the only control the student can still reach.
++void MainWindow::setScreenDetached(bool detached) {
++    DockWidget *dock = ui->screenDock;
++
++    m_screenDetached = detached;
++    m_config->setValue(SETTING_SCREEN_DETACHED, detached);
++    if (m_actionDetachScreen) {
++        m_actionDetachScreen->setChecked(detached);
++    }
++
++    // Before anything moves: the size constraints belong to the new mode, not the
++    // old one. Detached they are relaxed, and the floating window cannot be sized
++    // until they are. Expandability is the dock's own knob for the same thing, and
++    // is what any later show of the dock will re-apply from.
++    dock->setExpandable(detached);
++    lcdAdjust();
++
++    if (dock->isFloating() != detached) {
++        // Open the areas just for the move and hand control straight back to
++        // setState(), which puts the drag handles away again.
++        const Qt::DockWidgetAreas areas = dock->allowedAreas();
++        dock->setAllowedAreas(Qt::AllDockWidgetAreas);
++        if (detached) {
++            // The keypad is left holding a window sized for the whole calculator, so
++            // give back the height the screen was using and remember it for the
++            // journey home.
++            const int dockHeight = dock->height();
++            m_config->setValue(SETTING_WINDOW_ATTACHED_HEIGHT, height());
++
++            dock->setFloating(true);
++            const QByteArray geometry =
++                m_config->value(SETTING_SCREEN_DETACHED_GEOMETRY).toByteArray();
++            if (geometry.isEmpty() || !dock->restoreGeometry(geometry)) {
++                // First time out: as big as this display will take, which is the
++                // whole point of detaching it.
++                const QRect avail = qApp->screens().first()->availableGeometry();
++                const int h = qRound(avail.height() * 0.9);
++                const QSize size{qMin(qRound(h * 440.0 / 351.0), avail.width()), h};
++                dock->resize(size);
++                dock->move(avail.center() - QPoint{size.width() / 2, size.height() / 2});
++            }
++            resize(width(), qMax(minimumHeight(), height() - dockHeight));
++        } else {
++            m_config->setValue(SETTING_SCREEN_DETACHED_GEOMETRY, dock->saveGeometry());
++            dock->makeRealWindow(false);
++            dock->setWindowFlags(Qt::Widget);   /* undo the real-window flags */
++            dock->setFloating(false);
++            if (dock->isFloating()) {
++                // No remembered home -- a profile that has only ever been detached.
++                // Put it back above the keypad, which is where the calculator is.
++                if (DockWidget *keypadDock =
++                        findChild<DockWidget *>(QStringLiteral("keypadWidget_dock"))) {
++                    addDockWidget(dockWidgetArea(keypadDock), dock);
++                    splitDockWidget(dock, keypadDock, Qt::Vertical);
++                } else {
++                    addDockWidget(Qt::TopDockWidgetArea, dock);
++                }
++            }
++            const int attached = m_config->value(SETTING_WINDOW_ATTACHED_HEIGHT, 0).toInt();
++            if (attached > height()) {
++                resize(width(), attached);
++            }
++        }
++        dock->setAllowedAreas(areas);
++    }
++
++    // A real window rather than Qt's Qt::Tool float, so it stays up when the student
++    // clicks another application -- see DockWidget::setState(), which is where the
++    // flags have to be applied to survive.
++    dock->makeRealWindow(detached);
++    dock->setState(m_uiEditMode);
++    dock->setVisible(true);
++    if (detached) {
++        dock->raise();
++        dock->activateWindow();
++    }
++    lcdAdjust();
++    // Queued: the dock's new geometry is not final until this returns, and the scale
++    // is derived from that geometry.
++    QTimer::singleShot(0, this, &MainWindow::scaleToWindow);
++}
++
  void MainWindow::setLcdUpscale(int value) {
      m_config->setValue(SETTING_SCREEN_UPSCALE, value);
      ui->upscaleLCD->setCurrentIndex(value);
@@ -1188,7 +1502,7 @@ index 646a33b..c0cc57a 100644
  void MainWindow::setLcdFullscreen(int value) {
      m_config->setValue(SETTING_SCREEN_FULLSCREEN, value);
      ui->fullscreenLCD->setCurrentIndex(value);
-@@ -1282,6 +1353,7 @@ void MainWindow::guiExport() {
+@@ -1282,6 +1495,7 @@ void MainWindow::guiExport() {
  
      QSettings window(path, QSettings::IniFormat);
      window.setValue(SETTING_SCREEN_SKIN, m_config->value(SETTING_SCREEN_SKIN));
@@ -1196,7 +1510,7 @@ index 646a33b..c0cc57a 100644
      window.setValue(SETTING_WINDOW_FULLSCREEN, m_fullscreen);
      window.setValue(SETTING_WINDOW_MENUBAR, m_config->value(SETTING_WINDOW_MENUBAR));
      window.setValue(SETTING_WINDOW_STATUSBAR, m_config->value(SETTING_WINDOW_STATUSBAR));
-@@ -1312,6 +1384,7 @@ void MainWindow::guiImport() {
+@@ -1312,6 +1526,7 @@ void MainWindow::guiImport() {
      QSettings window(path, QSettings::IniFormat);
      ipcCloseConnected();
      m_config->setValue(SETTING_SCREEN_SKIN, window.value(SETTING_SCREEN_SKIN));
