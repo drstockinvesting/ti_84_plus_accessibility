@@ -34,6 +34,13 @@ as trusted without showing "Unknown Publisher" or security flags:
   store (`certutil -user`). It NEVER requires Administrator elevation
   or UAC prompts, and works on standard student/school Windows accounts.
 
+* Note on this build (2026-09-13, "Magnify Keypad"): CEmu.exe here came
+  straight from the automated build and has NOT been re-signed yet, so
+  Windows may still say "Unknown Publisher" even with the certificate
+  installed. It runs either way -- use Start-CEmu.bat, which clears the
+  downloaded-file flag first. Re-sign it with the same certificate to
+  get the publisher name back.
+
 
 ----------------------------------------------------------------
   ACCESSIBILITY FEATURES
