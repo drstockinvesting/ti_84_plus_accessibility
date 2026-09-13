@@ -84,6 +84,39 @@ which puts it back to the standard size.
 
 
 ----------------------------------------------------------------
+  MAGNIFIER  --  a close-up look
+----------------------------------------------------------------
+
+To make everything 4 TIMES BIGGER for a moment:
+
+    PRESS AND HOLD on the calculator SCREEN
+    (hold still for about half a second, then let go)
+
+A YELLOW BORDER appears around the screen and the keys. Both
+are now 4x. Move the mouse and the close-up follows it -- what
+is under the mouse pointer is what you are looking at.
+
+TO GO BACK, do any one of these:
+
+    press and hold on the screen again
+    press the  esc  key on the Mac keyboard
+    Extras > Magnifier
+
+WHILE IT IS MAGNIFIED:
+
+    The keys still work normally. Click a key the same way you
+    always do -- whatever is under the mouse pointer is the key
+    that gets pressed, even though it looks bigger.
+
+    Holding a key down still repeats it, exactly like a real
+    calculator. That is why the press-and-hold has to be done
+    on the SCREEN and not on the keys.
+
+    The screen stays where you left it while you reach down to
+    the keys, so you do not lose your place.
+
+
+----------------------------------------------------------------
   SCREEN COLORS
 ----------------------------------------------------------------
 
