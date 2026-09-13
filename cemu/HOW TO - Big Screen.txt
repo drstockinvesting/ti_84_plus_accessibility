@@ -114,6 +114,12 @@ This works even in Big Calculator Screen mode.
 It can also be changed under  Docks > Settings , in the
 "Display" box, next to "Screen colors:".
 
+The bar along the TOP of the screen -- the one that says
+NORMAL FLOAT AUTO REAL RADIAN MP, with the battery in the
+corner -- is left DARK with white writing. On a real calculator
+that bar is already dark, so it is the one part of the screen
+that does not get turned around.
+
 Note: the graph colors are NOT the same as a real calculator's.
 Red becomes pink, orange becomes indigo, yellow becomes aqua.
 Blue, green and purple stay close to themselves. If a teacher
