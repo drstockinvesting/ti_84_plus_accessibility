@@ -16,11 +16,292 @@ index 34d7e6d..5643d79 100644
      mInverseTransform = mTransform.inverted();
  }
  
+diff --git a/gui/qt/lcdwidget.cpp b/gui/qt/lcdwidget.cpp
+index e5ed126..90c8973 100644
+--- a/gui/qt/lcdwidget.cpp
++++ b/gui/qt/lcdwidget.cpp
+@@ -16,6 +16,7 @@
+ #include <QtCore/QMetaMethod>
+ #include <QtCore/QTimer>
+ #include <QtGui/QPainter>
++#include <QtGui/QColor>
+ #include <QtGui/QMouseEvent>
+ #include <QtGui/QDrag>
+ #include <QtWidgets/QMenu>
+@@ -224,6 +225,167 @@ void LCDWidget::disableBlend() {
+     }
+ }
+ 
++/* ------------------------------------------------------------------------
++ *  High-contrast palette
++ *
++ *  This build is for a student with Stargardt disease who reads the screen at
++ *  up to 10x magnification, so TI's black-ink-on-a-white-field display is a
++ *  page-sized glare source. Everything below remaps each frame to cool ink on
++ *  true black.
++ *
++ *  The model is ink on paper. A TI pixel is some coverage of one coloured ink
++ *  laid over a white background, so
++ *
++ *      alpha = 1 - min(r,g,b)/255          how much ink is on this pixel
++ *      ink   = (pixel - 255)/alpha + 255   the ink's own colour, un-mixed
++ *
++ *  By construction min(ink) is exactly 0, so the ink is always fully saturated
++ *  and carries just two free numbers: hue and value. Black ink falls out as
++ *  value 0, which is what lets grey text and anti-aliased edges come through
++ *  as a clean grey ramp rather than a coloured halo.
++ *
++ *  Output is alpha * newInk over black, so coverage survives the remap: the
++ *  white field becomes true black, and a faint anti-aliased edge stays faint
++ *  instead of blooming into a ring around every glyph.
++ * ---------------------------------------------------------------------- */
++
++/* Source hue -> replacement hue, in degrees. Cool hues keep their identity and
++ * the warm ones are folded into the gaps between them, which is the "cool
++ * first, warm last" priority this was asked for. Folding 360 degrees of source
++ * into 190 degrees of cool costs separation somewhere, so the anchors are
++ * placed to spend it on the colours that are rarely used: TI-OS assigns
++ * Y1..Y5 blue, red, black, magenta and green, and those five stay far apart
++ * while orange and brown -- the two warmest -- end up as neighbours. */
++static const struct { int from, to; } sHueAnchors[] = {
++    {   0, 325 },   /* red     -> pink    */
++    {  31, 248 },   /* orange  -> indigo  */
++    {  60, 163 },   /* yellow  -> aqua    */
++    { 120, 138 },   /* green   -> green   */
++    { 201, 190 },   /* ltblue  -> cyan    */
++    { 240, 222 },   /* blue    -> blue    */
++    { 300, 277 },   /* magenta -> purple  */
++};
++
++/* Nearest anchor wins, rather than interpolating between them. Interpolation
++ * looks tidier but the table is deliberately not monotone -- red sits next to
++ * magenta at one end and orange at the other -- so a smooth sweep between two
++ * anchors would pass straight through a third anchor's colour. Brown, whose
++ * hue is 9 degrees off orange's, came out indistinguishable from navy that
++ * way. Snapping costs some banding on photographic content, which the
++ * calculator does not show, and buys separation on content it does. */
++static qreal remapHue(qreal hue) {
++    const size_t count = sizeof(sHueAnchors) / sizeof(sHueAnchors[0]);
++    qreal best = sHueAnchors[0].to, bestDist = 360.0;
++    for (size_t i = 0; i < count; i++) {
++        qreal dist = qAbs(hue - sHueAnchors[i].from);
++        dist = qMin(dist, 360.0 - dist);
++        if (dist < bestDist) {
++            bestDist = dist;
++            best = sHueAnchors[i].to;
++        }
++    }
++    return best;
++}
++
++/* Relative luminance, so every ink can be held above a contrast ratio on black.
++ * 4.5:1 is the floor: blue is intrinsically dark and pinning it any higher
++ * washed navy and blue into the same colour. */
++static const qreal sMinLuminance = 0.175;   /* (4.5 * 0.05) - 0.05 */
++
++static qreal luminance(const QColor &c) {
++    static qreal linear[256];
++    static bool ready = false;
++    if (!ready) {
++        for (int i = 0; i < 256; i++) {
++            const qreal v = i / 255.0;
++            linear[i] = v <= 0.03928 ? v / 12.92 : std::pow((v + 0.055) / 1.055, 2.4);
++        }
++        ready = true;
++    }
++    return 0.2126 * linear[c.red()] + 0.7152 * linear[c.green()] + 0.0722 * linear[c.blue()];
++}
++
++void LCDWidget::buildPaletteLut() {
++    if (m_paletteMode == PaletteOriginal) {
++        m_paletteLut.clear();
++        return;
++    }
++
++    m_paletteLut.resize(1 << 16);
++    QRgb *lut = m_paletteLut.data();
++    for (int i = 0; i < 1 << 16; i++) {
++        /* The panel hands us RGB565 widened by bit replication (lcd_argb8888out),
++         * so indexing by the 565 form is exact for real frames and no worse than
++         * a rounding for anything else. 64K entries keeps this to one load per
++         * pixel at draw time. */
++        int r = (i >> 11 & 0x1F) << 3; r |= r >> 5;
++        int g = (i >>  5 & 0x3F) << 2; g |= g >> 6;
++        int b = (i       & 0x1F) << 3; b |= b >> 5;
++
++        const int lo = qMin(r, qMin(g, b));
++        const qreal alpha = 1.0 - lo / 255.0;
++        if (alpha <= 0.0) {
++            lut[i] = qRgb(0, 0, 0);     /* the white field becomes true black */
++            continue;
++        }
++        const int hi = qMax(r, qMax(g, b));
++        const qreal value = (hi - lo) / (255.0 - lo);   /* == max(ink) / 255 */
++
++        QColor ink = Qt::white;
++        if (m_paletteMode != PaletteMono && value > 0.0) {
++            const QColor src(qBound(0, qRound((r - 255) / alpha) + 255, 255),
++                             qBound(0, qRound((g - 255) / alpha) + 255, 255),
++                             qBound(0, qRound((b - 255) / alpha) + 255, 255));
++            const qreal hue = src.hueF();
++            if (hue >= 0.0) {
++                const qreal target = remapHue(hue * 360.0) / 360.0;
++                /* A darker ink (navy beside blue, brown beside orange) comes back
++                 * mostly as a deeper version of its hue rather than a dimmer one,
++                 * because dimming is the one thing this student cannot afford.
++                 * Some of the difference still has to ride on brightness or the
++                 * two collapse into one colour, hence the small value term. */
++                qreal sat = qMin(1.0, 0.50 + 0.45 * (1.0 - value));
++                qreal val = qMin(1.0, 0.66 + 0.34 * value);
++                /* Un-mixing the ink from white makes every ink fully saturated by
++                 * construction, so without this a source that is only faintly
++                 * tinted would come back at full strength. That is not academic:
++                 * the panel gives each channel its own gamma curve, so a backlit
++                 * white is never exactly neutral, and an idle-dimmed screen turned
++                 * the whole background into saturated purple. Ramp the colour in
++                 * only once the source is genuinely chromatic. */
++                qreal chroma = qBound(0.0, ((hi - lo) / qreal(hi) - 0.15) / 0.40, 1.0);
++                sat *= chroma * chroma * (3.0 - 2.0 * chroma);   /* smoothstep */
++                for (int tries = 0; tries < 24; tries++) {
++                    ink = QColor::fromHsvF(target, sat, val);
++                    if (luminance(ink) >= sMinLuminance) {
++                        break;
++                    }
++                    /* Brighten first and only desaturate once there is no headroom
++                     * left, so the hue survives as long as possible. */
++                    if (val < 1.0) {
++                        val = qMin(1.0, val * 1.06);
++                    } else if (sat > 0.02) {
++                        sat *= 0.93;
++                    } else {
++                        break;
++                    }
++                }
++            }
++        }
++        lut[i] = qRgb(qRound(ink.red()   * alpha),
++                      qRound(ink.green() * alpha),
++                      qRound(ink.blue()  * alpha));
++    }
++}
++
++void LCDWidget::setPaletteMode(int mode) {
++    m_mutex.lock();
++    m_paletteMode = static_cast<PaletteMode>(mode);
++    buildPaletteLut();
++    m_mutex.unlock();
++    update();
++}
++
+ // called by the emu thread to draw the lcd
+ bool LCDWidget::draw() {
+     if (m_skip) {
+@@ -234,6 +396,41 @@ bool LCDWidget::draw() {
+         m_mutex.lock();
+         m_blendedFrame.swap(m_renderedFrame);
+         emu_lcd_drawframe(m_renderedFrame.bits());
++        if (!m_paletteLut.isEmpty() && (lcd.useDma || (lcd.control & 1 << 11))) {
++            /* Guarded on exactly the condition emu_lcd_drawframe uses internally:
++             * when it leaves the buffer alone, these are the frame-before-last's
++             * already-remapped pixels, and the map is not idempotent. */
++            const QRgb *lut = m_paletteLut.constData();
++            QRgb *px = reinterpret_cast<QRgb *>(m_renderedFrame.bits());
++
++            /* In the DMA path the panel bakes backlight.factor into its gamma table,
++             * so TI-OS dimming the screen after two idle minutes hands us a tinted
++             * grey where white used to be -- and a grey background is exactly what
++             * this whole remap exists to get rid of. Undo the dimming before the
++             * lookup and re-apply it after, which leaves the screen fading toward
++             * black instead of toward grey. The non-DMA path dims further down with
++             * a black fill, after this runs, so there is nothing to undo there. */
++            const float factor = backlight.factor;
++            const bool dimmed = lcd.useDma && factor > 0.0f && factor < 1.0f;
++            uint8_t gain5[32], gain6[64], dim[256];
++            if (dimmed) {
++                for (int i = 0; i < 32; i++)  { gain5[i] = qMin(31, qRound(i / factor)); }
++                for (int i = 0; i < 64; i++)  { gain6[i] = qMin(63, qRound(i / factor)); }
++                for (int i = 0; i < 256; i++) { dim[i] = static_cast<uint8_t>(qRound(i * factor)); }
++            }
++
++            for (size_t i = 0; i < LCD_WIDTH * LCD_HEIGHT; i++) {
++                const QRgb c = px[i];
++                if (dimmed) {
++                    const QRgb out = lut[static_cast<size_t>(gain5[c >> 19 & 0x1F]) << 11 |
++                                         static_cast<size_t>(gain6[c >> 10 & 0x3F]) <<  5 |
++                                         static_cast<size_t>(gain5[c >>  3 & 0x1F])];
++                    px[i] = qRgb(dim[qRed(out)], dim[qGreen(out)], dim[qBlue(out)]);
++                } else {
++                    px[i] = lut[(c >> 8 & 0xF800) | (c >> 5 & 0x07E0) | (c >> 3 & 0x001F)];
++                }
++            }
++        }
+         if (!lcd.useDma && backlight.factor < 1.0f) {
+             QPainter c(&m_renderedFrame);
+             c.fillRect(c.window(), QColor(0, 0, 0, (1.0f - backlight.factor) * 255.0f));
+diff --git a/gui/qt/lcdwidget.h b/gui/qt/lcdwidget.h
+index 6629c39..005fabc 100644
+--- a/gui/qt/lcdwidget.h
++++ b/gui/qt/lcdwidget.h
+@@ -4,6 +4,7 @@
+ #include <QtWidgets/QWidget>
+ #include <QtCore/QTimer>
+ #include <QtCore/QMutex>
++#include <QtGui/QRgb>
+ #include <chrono>
+ 
+ #include "../../core/lcd.h"
+@@ -24,6 +25,12 @@ public:
+         IntegerUpscale
+     };
+ 
++    enum PaletteMode {
++        PaletteOriginal,
++        PaletteHighContrast,
++        PaletteMono
++    };
++
+     explicit LCDWidget(QWidget *p = Q_NULLPTR);
+     QImage getImage();
+     void setMain();
+@@ -32,6 +39,7 @@ public:
+     void setResponseMode(bool state);
+     void setUpscaleMethod(int method);
+     void setFullscreenArea(int area);
++    void setPaletteMode(int mode);
+     void disableBlend();
+ 
+ signals:
+@@ -53,6 +61,8 @@ signals:
+     void sendROM(const QString& romPath);
+ 
+ private:
++    void buildPaletteLut();
++
+     enum {
+         LcdLeft = 0,
+         LcdRight
+@@ -82,6 +92,8 @@ private:
+ 
+     enum UpscaleMethod m_upscale = SharpBilinear;
+     enum FullscreenArea m_fullscreenArea = PreserveAspectRatio;
++    enum PaletteMode m_paletteMode = PaletteOriginal;
++    QList<QRgb> m_paletteLut;
+ };
+ 
+ #endif
 diff --git a/gui/qt/mainwindow.cpp b/gui/qt/mainwindow.cpp
-index 11907c2..b5405a0 100644
+index 11907c2..07ef9f3 100644
 --- a/gui/qt/mainwindow.cpp
 +++ b/gui/qt/mainwindow.cpp
-@@ -584,6 +584,7 @@ MainWindow::MainWindow(CEmuOpts &cliOpts, QWidget *p) : QMainWindow(p), ui(new U
+@@ -378,6 +378,7 @@ MainWindow::MainWindow(CEmuOpts &cliOpts, QWidget *p) : QMainWindow(p), ui(new U
+     connect(ui->scaleLCD, static_cast<void (QSpinBox::*)(int)>(&QSpinBox::valueChanged), this, &MainWindow::setLcdScale);
+     connect(ui->upscaleLCD, static_cast<void (QComboBox::*)(int)>(&QComboBox::currentIndexChanged), this, &MainWindow::setLcdUpscale);
+     connect(ui->fullscreenLCD, static_cast<void (QComboBox::*)(int)>(&QComboBox::currentIndexChanged), this, &MainWindow::setLcdFullscreen);
++    connect(ui->paletteLCD, static_cast<void (QComboBox::*)(int)>(&QComboBox::currentIndexChanged), this, &MainWindow::setLcdPalette);
+     connect(ui->guiSkip, static_cast<void (QSpinBox::*)(int)>(&QSpinBox::valueChanged), this, &MainWindow::setGuiSkip);
+     connect(ui->checkSkin, &QCheckBox::stateChanged, this, &MainWindow::setSkinToggle);
+     connect(ui->comboBoxAsicRev, static_cast<void (QComboBox::*)(int)>(&QComboBox::currentIndexChanged), this, &MainWindow::setAsicRevision);
+@@ -584,9 +585,11 @@ MainWindow::MainWindow(CEmuOpts &cliOpts, QWidget *p) : QMainWindow(p), ui(new U
      setFrameskip(m_config->value(SETTING_CAPTURE_FRAMESKIP, 1).toInt());
      setOptimizeRecord(m_config->value(SETTING_CAPTURE_OPTIMIZE, true).toBool());
      setStatusInterval(m_config->value(SETTING_STATUS_INTERVAL, 1).toInt());
@@ -28,7 +309,11 @@ index 11907c2..b5405a0 100644
      setLcdScale(m_config->value(SETTING_SCREEN_SCALE, 100).toInt());
      setLcdUpscale(m_config->value(SETTING_SCREEN_UPSCALE, LCDWidget::SharpBilinear).toInt());
      setLcdFullscreen(m_config->value(SETTING_SCREEN_FULLSCREEN, LCDWidget::PreserveAspectRatio).toInt());
-@@ -1009,6 +1010,15 @@ void MainWindow::raiseContainingDock(QWidget *widget) {
++    setLcdPalette(m_config->value(SETTING_SCREEN_PALETTE, LCDWidget::PaletteHighContrast).toInt());
+     setSkinToggle(m_config->value(SETTING_SCREEN_SKIN, true).toBool());
+     setLcdDma(m_config->value(SETTING_SCREEN_DMA, true).toBool());
+     setLcdGamma(m_config->value(SETTING_SCREEN_GAMMA, true).toBool());
+@@ -1009,6 +1012,15 @@ void MainWindow::raiseContainingDock(QWidget *widget) {
      }
  }
  
@@ -44,7 +329,7 @@ index 11907c2..b5405a0 100644
  void MainWindow::mouseDoubleClickEvent(QMouseEvent *event) {
      if (!childAt(event->pos())) {
          int sep = style()->pixelMetric(QStyle::PM_DockWidgetSeparatorExtent, Q_NULLPTR, this);
-@@ -1054,6 +1064,7 @@ void MainWindow::setup() {
+@@ -1054,6 +1066,7 @@ void MainWindow::setup() {
      }
  
      setUIEditMode(m_uiEditMode);
@@ -52,8 +337,28 @@ index 11907c2..b5405a0 100644
  
      stateLoadInfo();
      recentLoadInfo();
+@@ -1859,6 +1872,19 @@ void MainWindow::contextLcd(const QPoint &posa) {
+     menu.addMenu(ui->menuCapture);
+     menu.addMenu(m_menuDocks);
+     menu.addMenu(ui->menuExtras);
++
++    /* The LCD context menu is the only one that stays reachable with the menu bar
++     * hidden and in screen-only mode, so the colour switch lives here as well as
++     * in the settings dock -- it is the control most likely to be wanted in a
++     * hurry, when the room lights change. */
++    QMenu *colors = menu.addMenu(tr("Screen Colors"));
++    for (int i = 0; i < ui->paletteLCD->count(); i++) {
++        QAction *entry = colors->addAction(ui->paletteLCD->itemText(i));
++        entry->setCheckable(true);
++        entry->setChecked(ui->paletteLCD->currentIndex() == i);
++        connect(entry, &QAction::triggered, this, [this, i]{ setLcdPalette(i); });
++    }
++
+     menu.exec(globalPos);
+ }
+ 
 diff --git a/gui/qt/mainwindow.h b/gui/qt/mainwindow.h
-index 9b67949..e640fcf 100644
+index 9b67949..c7e4ecd 100644
 --- a/gui/qt/mainwindow.h
 +++ b/gui/qt/mainwindow.h
 @@ -68,6 +68,7 @@ protected:
@@ -64,15 +369,17 @@ index 9b67949..e640fcf 100644
      virtual void mouseDoubleClickEvent(QMouseEvent *event) Q_DECL_OVERRIDE;
      virtual void dropEvent(QDropEvent *event) Q_DECL_OVERRIDE;
      virtual void dragEnterEvent(QDragEnterEvent *event) Q_DECL_OVERRIDE;
-@@ -413,6 +414,7 @@ private:
+@@ -413,7 +414,9 @@ private:
      void setSkinToggle(bool state);
      void setGuiSkip(int value);
      void setLcdScale(int value);
 +    void scaleToWindow();
      void setLcdUpscale(int value);
++    void setLcdPalette(int value);
      void setLcdFullscreen(int value);
      void setLcdDma(bool state);
-@@ -688,6 +690,10 @@ private:
+     void setLcdGamma(bool state);
+@@ -688,6 +691,10 @@ private:
      bool m_allowAnyRev;
      bool m_normalOs;
      bool m_setup = false;
@@ -83,27 +390,71 @@ index 9b67949..e640fcf 100644
      int m_fullscreen = FULLSCREEN_NONE;
      uint32_t m_runUntilAddr;
  
-@@ -742,6 +748,7 @@ private:
+@@ -742,7 +749,9 @@ private:
      static const QString SETTING_PYTHON_EDITION;
      static const QString SETTING_SCREEN_FRAMESKIP;
      static const QString SETTING_SCREEN_SCALE;
 +    static const QString SETTING_SCREEN_SCALE_WITH_WINDOW;
      static const QString SETTING_SCREEN_UPSCALE;
++    static const QString SETTING_SCREEN_PALETTE;
      static const QString SETTING_SCREEN_FULLSCREEN;
      static const QString SETTING_SCREEN_SKIN;
+     static const QString SETTING_SCREEN_DMA;
+diff --git a/gui/qt/mainwindow.ui b/gui/qt/mainwindow.ui
+index 6430641..afb482a 100644
+--- a/gui/qt/mainwindow.ui
++++ b/gui/qt/mainwindow.ui
+@@ -7646,6 +7646,35 @@
+                  </property>
+                 </spacer>
+                </item>
++               <item row="1" column="0" colspan="3">
++                <widget class="QLabel" name="labelPalette">
++                 <property name="text">
++                  <string>Screen colors:</string>
++                 </property>
++                </widget>
++               </item>
++               <item row="1" column="3" colspan="5">
++                <widget class="QComboBox" name="paletteLCD">
++                 <property name="toolTip">
++                  <string>High contrast redraws the screen as coloured ink on black, which removes the glare of the white background and keeps every stroke above a 4.5:1 contrast ratio. Cool hues are favoured over warm ones.</string>
++                 </property>
++                 <item>
++                  <property name="text">
++                   <string>Original</string>
++                  </property>
++                 </item>
++                 <item>
++                  <property name="text">
++                   <string>High Contrast (cool on black)</string>
++                  </property>
++                 </item>
++                 <item>
++                  <property name="text">
++                   <string>High Contrast (white on black)</string>
++                  </property>
++                 </item>
++                </widget>
++               </item>
+               </layout>
+              </widget>
+             </item>
 diff --git a/gui/qt/settings.cpp b/gui/qt/settings.cpp
-index 646a33b..32d4920 100644
+index 646a33b..c0cc57a 100644
 --- a/gui/qt/settings.cpp
 +++ b/gui/qt/settings.cpp
-@@ -56,6 +56,7 @@ const QString MainWindow::SETTING_DEBUGGER_NORM_OS          = QStringLiteral("De
+@@ -56,7 +56,9 @@ const QString MainWindow::SETTING_DEBUGGER_NORM_OS          = QStringLiteral("De
  const QString MainWindow::SETTING_PYTHON_EDITION            = QStringLiteral("python_edition");
  const QString MainWindow::SETTING_SCREEN_FRAMESKIP          = QStringLiteral("Screen/frameskip");
  const QString MainWindow::SETTING_SCREEN_SCALE              = QStringLiteral("Screen/scale");
 +const QString MainWindow::SETTING_SCREEN_SCALE_WITH_WINDOW  = QStringLiteral("Screen/scale_with_window");
  const QString MainWindow::SETTING_SCREEN_UPSCALE            = QStringLiteral("Screen/upscale");
++const QString MainWindow::SETTING_SCREEN_PALETTE            = QStringLiteral("Screen/palette");
  const QString MainWindow::SETTING_SCREEN_FULLSCREEN         = QStringLiteral("Screen/fullscreen");
  const QString MainWindow::SETTING_SCREEN_SKIN               = QStringLiteral("Screen/skin");
-@@ -724,13 +725,20 @@ void MainWindow::lcdAdjust() {
+ const QString MainWindow::SETTING_SCREEN_DMA                = QStringLiteral("Screen/dma");
+@@ -724,13 +726,20 @@ void MainWindow::lcdAdjust() {
      w = LCD_WIDTH * scale;
      h = LCD_HEIGHT * scale;
      ui->lcd->setFixedSize(w, h);
@@ -126,7 +477,7 @@ index 646a33b..32d4920 100644
  }
  
  void MainWindow::setLcdScale(int scale) {
-@@ -740,6 +748,62 @@ void MainWindow::setLcdScale(int scale) {
+@@ -740,12 +749,74 @@ void MainWindow::setLcdScale(int scale) {
      lcdAdjust();
  }
  
@@ -189,3 +540,31 @@ index 646a33b..32d4920 100644
  void MainWindow::setLcdUpscale(int value) {
      m_config->setValue(SETTING_SCREEN_UPSCALE, value);
      ui->upscaleLCD->setCurrentIndex(value);
+     ui->lcd->setUpscaleMethod(value);
+ }
+ 
++void MainWindow::setLcdPalette(int value) {
++    m_config->setValue(SETTING_SCREEN_PALETTE, value);
++    ui->paletteLCD->setCurrentIndex(value);
++    ui->lcd->setPaletteMode(value);
++}
++
+ void MainWindow::setLcdFullscreen(int value) {
+     m_config->setValue(SETTING_SCREEN_FULLSCREEN, value);
+     ui->fullscreenLCD->setCurrentIndex(value);
+@@ -1282,6 +1353,7 @@ void MainWindow::guiExport() {
+ 
+     QSettings window(path, QSettings::IniFormat);
+     window.setValue(SETTING_SCREEN_SKIN, m_config->value(SETTING_SCREEN_SKIN));
++    window.setValue(SETTING_SCREEN_PALETTE, m_config->value(SETTING_SCREEN_PALETTE));
+     window.setValue(SETTING_WINDOW_FULLSCREEN, m_fullscreen);
+     window.setValue(SETTING_WINDOW_MENUBAR, m_config->value(SETTING_WINDOW_MENUBAR));
+     window.setValue(SETTING_WINDOW_STATUSBAR, m_config->value(SETTING_WINDOW_STATUSBAR));
+@@ -1312,6 +1384,7 @@ void MainWindow::guiImport() {
+     QSettings window(path, QSettings::IniFormat);
+     ipcCloseConnected();
+     m_config->setValue(SETTING_SCREEN_SKIN, window.value(SETTING_SCREEN_SKIN));
++    m_config->setValue(SETTING_SCREEN_PALETTE, window.value(SETTING_SCREEN_PALETTE));
+     m_config->setValue(SETTING_WINDOW_FULLSCREEN, window.value(SETTING_WINDOW_FULLSCREEN));
+     m_config->setValue(SETTING_WINDOW_GEOMETRY, window.value(SETTING_WINDOW_GEOMETRY));
+     m_config->setValue(SETTING_WINDOW_STATE, window.value(SETTING_WINDOW_STATE));

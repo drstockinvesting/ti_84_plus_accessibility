@@ -84,6 +84,42 @@ which puts it back to the standard size.
 
 
 ----------------------------------------------------------------
+  SCREEN COLORS
+----------------------------------------------------------------
+
+The calculator screen normally has a WHITE background, which is
+a lot of glare when the screen is magnified. This copy starts up
+with that turned around.
+
+    HIGH CONTRAST     black background, white writing, and the
+    (cool on black)   graph colors changed to cool ones -- green,
+                      cyan, blue, purple and pink. This is how it
+                      starts up.
+
+    HIGH CONTRAST     black background, everything in white.
+    (white on black)  Use this if the colors are more distracting
+                      than useful.
+
+    ORIGINAL          exactly what a real TI-84 Plus CE shows.
+                      Use this to check what a worksheet or a
+                      teacher's screen is supposed to look like.
+
+TO CHANGE IT, the quick way:
+
+    right-click anywhere on the calculator screen,
+    then choose  Screen Colors .
+
+This works even in Big Calculator Screen mode.
+
+It can also be changed under  Docks > Settings , in the
+"Display" box, next to "Screen colors:".
+
+Note: the graph colors are NOT the same as a real calculator's.
+Red becomes pink, orange becomes indigo, yellow becomes aqua.
+Blue, green and purple stay close to themselves. If a teacher
+says "look at the red line", that is the PINK one here.
+
+----------------------------------------------------------------
   IF THE PANELS EVER GET PULLED APART
 ----------------------------------------------------------------
 
