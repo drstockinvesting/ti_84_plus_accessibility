@@ -1,0 +1,45 @@
+diff --git a/gui/qt/CMakeLists.txt b/gui/qt/CMakeLists.txt
+index ff34392..2b3f165 100644
+--- a/gui/qt/CMakeLists.txt
++++ b/gui/qt/CMakeLists.txt
+@@ -333,10 +333,21 @@ message("Binary dir: ${CMAKE_CURRENT_BINARY_DIR}")
+ # TODO: linux .desktop/.xml files
+ 
+ if(COMMAND qt_generate_deploy_app_script)
+-    qt_generate_deploy_app_script(
+-        TARGET CEmu
+-        FILENAME_VARIABLE deploy_script
+-        NO_UNSUPPORTED_PLATFORM_ERROR
+-    )
++    # Qt 6.7 renamed FILENAME_VARIABLE to OUTPUT_SCRIPT, and 6.11 rejects the old
++    # spelling outright ("Unexpected arguments"). Accept both so this still builds
++    # against the Qt that CEmu 2.0 originally targeted.
++    if(QT_VERSION VERSION_GREATER_EQUAL 6.7)
++        qt_generate_deploy_app_script(
++            TARGET CEmu
++            OUTPUT_SCRIPT deploy_script
++            NO_UNSUPPORTED_PLATFORM_ERROR
++        )
++    else()
++        qt_generate_deploy_app_script(
++            TARGET CEmu
++            FILENAME_VARIABLE deploy_script
++            NO_UNSUPPORTED_PLATFORM_ERROR
++        )
++    endif()
+     install(SCRIPT ${deploy_script})
+ endif()
+diff --git a/gui/qt/mainwindow.cpp b/gui/qt/mainwindow.cpp
+index f03a743..11907c2 100644
+--- a/gui/qt/mainwindow.cpp
++++ b/gui/qt/mainwindow.cpp
+@@ -970,7 +970,8 @@ void MainWindow::showEvent(QShowEvent *e) {
+ DockWidget *MainWindow::redistributeFindDock(const QPoint &pos) {
+     QWidget *child = childAt(pos);
+     if (QTabBar *tabBar = findSelfOrParent<QTabBar *>(child)) {
+-        child = childAt({pos.x(), tabBar->mapTo(this, QPoint{}).y() - 1});
++        // Qt 6.11 added childAt(QPointF), which makes a braced initialiser ambiguous.
++        child = childAt(QPoint{pos.x(), tabBar->mapTo(this, QPoint{}).y() - 1});
+     }
+     return findSelfOrParent<DockWidget *>(child);
+ }

@@ -16,8 +16,12 @@
 set -euo pipefail
 
 CFG="$HOME/Library/Preferences/cemu-dev/CEmu/cemu_config.ini"
-APP="/Applications/CEmu.app"
-PROC="CEmu.app/Contents/MacOS/CEmu"
+# Prefer the accessible build (issue 3: the calculator scales as one object with the
+# window). It is self-contained, so it keeps working if Homebrew's Qt is ever removed.
+# Falls back to the stock App Store/prebuilt CEmu if the build is not installed.
+APP="$HOME/Documents/CEmu/CEmu Accessible.app"
+[ -d "$APP" ] || APP="/Applications/CEmu.app"
+PROC="MacOS/CEmu"
 
 [ -f "$CFG" ] || { echo "No CEmu config at $CFG" >&2; exit 1; }
 [ -d "$APP" ] || { echo "CEmu not found at $APP" >&2; exit 1; }
@@ -53,7 +57,7 @@ wait_gone() {
 }
 
 if pgrep -f "$PROC" >/dev/null; then
-  osascript -e 'tell application "CEmu" to quit' >/dev/null 2>&1 || true
+  osascript -e 'tell application id "com.yourcompany.CEmu" to quit' >/dev/null 2>&1 || true
   # Deliberately NO pkill fallback: SIGTERM was tested and CEmu writes neither its
   # config nor cemu_image.ce on it, so force-killing would throw away the student's
   # in-progress work. Failing to switch modes is the better outcome.

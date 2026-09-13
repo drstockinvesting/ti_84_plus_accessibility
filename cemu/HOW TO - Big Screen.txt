@@ -64,22 +64,23 @@ Any one of these gets you out:
 
 
 ----------------------------------------------------------------
-  DO NOT DRAG THE WINDOW BIGGER
+  RESIZING THE WINDOW
 ----------------------------------------------------------------
 
-Dragging the window edges does NOT make the calculator bigger.
-The screen stays the same size and slides to the top-left, and
-the keypad stays the same size in the bottom-middle, so the
-calculator comes apart into two pieces.
+Drag any edge or corner of the window and the WHOLE calculator
+now grows or shrinks together -- screen and keypad stay lined up
+and keep the real TI-84 Plus CE shape.
 
-If that happens, double-click:
+This screen is not tall enough to make it much bigger than it
+already is. For a genuinely big screen use:
+
+    Big Calculator Screen.app
+
+If the window ever looks wrong, double-click:
 
     Full Calculator.app
 
-It puts the window back to the one size where the screen and the
-keypad line up.
-
-To get a BIGGER screen, use "Big Calculator Screen.app" instead.
+which puts it back to the standard size.
 
 
 ----------------------------------------------------------------

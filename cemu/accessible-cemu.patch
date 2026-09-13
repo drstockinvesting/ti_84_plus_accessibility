@@ -1,0 +1,191 @@
+diff --git a/gui/qt/keypad/keypadwidget.cpp b/gui/qt/keypad/keypadwidget.cpp
+index 34d7e6d..5643d79 100644
+--- a/gui/qt/keypad/keypadwidget.cpp
++++ b/gui/qt/keypad/keypadwidget.cpp
+@@ -322,9 +322,12 @@ KeypadWidget::~KeypadWidget() {
+ void KeypadWidget::resizeEvent(QResizeEvent *event) {
+     QSize size{sBaseRect.size().scaled(event->size(), Qt::KeepAspectRatio)},
+         origin{(event->size() - size) / 2};
++    // dy was a literal 0, which centred the keypad horizontally but anchored it to
++    // the TOP. Combined with the screen widget being pinned left, that made the
++    // calculator visibly come apart at any window size but one. Centre both axes.
+     mTransform.setMatrix(static_cast<qreal>(size.width()) / sBaseRect.width(), 0, 0, 0,
+                          static_cast<qreal>(size.height()) / sBaseRect.height(), 0,
+-                         origin.width(), 0, 1);
++                         origin.width(), origin.height(), 1);
+     mInverseTransform = mTransform.inverted();
+ }
+ 
+diff --git a/gui/qt/mainwindow.cpp b/gui/qt/mainwindow.cpp
+index 11907c2..b5405a0 100644
+--- a/gui/qt/mainwindow.cpp
++++ b/gui/qt/mainwindow.cpp
+@@ -584,6 +584,7 @@ MainWindow::MainWindow(CEmuOpts &cliOpts, QWidget *p) : QMainWindow(p), ui(new U
+     setFrameskip(m_config->value(SETTING_CAPTURE_FRAMESKIP, 1).toInt());
+     setOptimizeRecord(m_config->value(SETTING_CAPTURE_OPTIMIZE, true).toBool());
+     setStatusInterval(m_config->value(SETTING_STATUS_INTERVAL, 1).toInt());
++    m_scaleWithWindow = m_config->value(SETTING_SCREEN_SCALE_WITH_WINDOW, true).toBool();
+     setLcdScale(m_config->value(SETTING_SCREEN_SCALE, 100).toInt());
+     setLcdUpscale(m_config->value(SETTING_SCREEN_UPSCALE, LCDWidget::SharpBilinear).toInt());
+     setLcdFullscreen(m_config->value(SETTING_SCREEN_FULLSCREEN, LCDWidget::PreserveAspectRatio).toInt());
+@@ -1009,6 +1010,15 @@ void MainWindow::raiseContainingDock(QWidget *widget) {
+     }
+ }
+ 
++void MainWindow::resizeEvent(QResizeEvent *event) {
++    QMainWindow::resizeEvent(event);
++    if (m_scaleWithWindow && m_setup) {
++        // Queued: during a live drag the dock geometries are not final until after
++        // this event returns, so reading them here would lag a frame behind.
++        QTimer::singleShot(0, this, &MainWindow::scaleToWindow);
++    }
++}
++
+ void MainWindow::mouseDoubleClickEvent(QMouseEvent *event) {
+     if (!childAt(event->pos())) {
+         int sep = style()->pixelMetric(QStyle::PM_DockWidgetSeparatorExtent, Q_NULLPTR, this);
+@@ -1054,6 +1064,7 @@ void MainWindow::setup() {
+     }
+ 
+     setUIEditMode(m_uiEditMode);
++    QTimer::singleShot(0, this, &MainWindow::scaleToWindow);
+ 
+     stateLoadInfo();
+     recentLoadInfo();
+diff --git a/gui/qt/mainwindow.h b/gui/qt/mainwindow.h
+index 9b67949..e640fcf 100644
+--- a/gui/qt/mainwindow.h
++++ b/gui/qt/mainwindow.h
+@@ -68,6 +68,7 @@ protected:
+     virtual void closeEvent(QCloseEvent *event) Q_DECL_OVERRIDE;
+     virtual bool eventFilter(QObject *obj, QEvent *event) Q_DECL_OVERRIDE;
+     virtual void showEvent(QShowEvent *event) Q_DECL_OVERRIDE;
++    virtual void resizeEvent(QResizeEvent *event) Q_DECL_OVERRIDE;
+     virtual void mouseDoubleClickEvent(QMouseEvent *event) Q_DECL_OVERRIDE;
+     virtual void dropEvent(QDropEvent *event) Q_DECL_OVERRIDE;
+     virtual void dragEnterEvent(QDragEnterEvent *event) Q_DECL_OVERRIDE;
+@@ -413,6 +414,7 @@ private:
+     void setSkinToggle(bool state);
+     void setGuiSkip(int value);
+     void setLcdScale(int value);
++    void scaleToWindow();
+     void setLcdUpscale(int value);
+     void setLcdFullscreen(int value);
+     void setLcdDma(bool state);
+@@ -688,6 +690,10 @@ private:
+     bool m_allowAnyRev;
+     bool m_normalOs;
+     bool m_setup = false;
++    // issue 3: scale the whole calculator with the window, instead of leaving a
++    // fixed-size screen and an aspect-locked keypad to drift apart.
++    bool m_scaleWithWindow = true;
++    bool m_scaling = false;
+     int m_fullscreen = FULLSCREEN_NONE;
+     uint32_t m_runUntilAddr;
+ 
+@@ -742,6 +748,7 @@ private:
+     static const QString SETTING_PYTHON_EDITION;
+     static const QString SETTING_SCREEN_FRAMESKIP;
+     static const QString SETTING_SCREEN_SCALE;
++    static const QString SETTING_SCREEN_SCALE_WITH_WINDOW;
+     static const QString SETTING_SCREEN_UPSCALE;
+     static const QString SETTING_SCREEN_FULLSCREEN;
+     static const QString SETTING_SCREEN_SKIN;
+diff --git a/gui/qt/settings.cpp b/gui/qt/settings.cpp
+index 646a33b..32d4920 100644
+--- a/gui/qt/settings.cpp
++++ b/gui/qt/settings.cpp
+@@ -56,6 +56,7 @@ const QString MainWindow::SETTING_DEBUGGER_NORM_OS          = QStringLiteral("De
+ const QString MainWindow::SETTING_PYTHON_EDITION            = QStringLiteral("python_edition");
+ const QString MainWindow::SETTING_SCREEN_FRAMESKIP          = QStringLiteral("Screen/frameskip");
+ const QString MainWindow::SETTING_SCREEN_SCALE              = QStringLiteral("Screen/scale");
++const QString MainWindow::SETTING_SCREEN_SCALE_WITH_WINDOW  = QStringLiteral("Screen/scale_with_window");
+ const QString MainWindow::SETTING_SCREEN_UPSCALE            = QStringLiteral("Screen/upscale");
+ const QString MainWindow::SETTING_SCREEN_FULLSCREEN         = QStringLiteral("Screen/fullscreen");
+ const QString MainWindow::SETTING_SCREEN_SKIN               = QStringLiteral("Screen/skin");
+@@ -724,13 +725,20 @@ void MainWindow::lcdAdjust() {
+     w = LCD_WIDTH * scale;
+     h = LCD_HEIGHT * scale;
+     ui->lcd->setFixedSize(w, h);
+-    ui->lcd->move(skin ? 60 * scale : 0, skin ? 78 * scale : 0);
+     if (skin) {
+         w = 440 * scale;
+         h = 351 * scale;
+     }
++    // Height is what the dock layout must honour; the width is left free so that a
++    // window wider than the calculator letterboxes symmetrically rather than pinning
++    // the faceplate to the left edge while the keypad sits centred (issue 3).
++    ui->screenWidget->setMinimumWidth(qRound(w));
++    ui->screenWidget->setMaximumWidth(QWIDGETSIZE_MAX);
++    ui->screenWidget->setFixedHeight(qRound(h));
++    const int xoff = qMax(0, qRound((ui->screenWidget->width() - w) / 2.0f));
++    ui->calcSkinTop->move(xoff, 0);
+     ui->calcSkinTop->resize(w, h);
+-    ui->screenWidget->setFixedSize(w, h);
++    ui->lcd->move(xoff + (skin ? qRound(60 * scale) : 0), skin ? qRound(78 * scale) : 0);
+ }
+ 
+ void MainWindow::setLcdScale(int scale) {
+@@ -740,6 +748,62 @@ void MainWindow::setLcdScale(int scale) {
+     lcdAdjust();
+ }
+ 
++// Issue 3. The two panels are sized by different rules -- a fixed-size screen and an
++// aspect-locked keypad -- so they line up at exactly one window size. Rather than
++// re-introduce a bitmap skin, derive the single `Screen/scale` from the window, which
++// is what lcdAdjust() already drives everything from. The whole calculator then grows
++// and shrinks as one object, keeping the crisp vector keypad.
++void MainWindow::scaleToWindow() {
++    if (!m_setup || m_scaling || !m_scaleWithWindow) {
++        return;
++    }
++    // FULLSCREEN_ALL is still an ordinary dock layout, just a bigger one, so it
++    // should scale too. FULLSCREEN_LCD is not: there the LCD is reparented out into
++    // its own window and the dock geometry here is meaningless.
++    if (m_fullscreen == FULLSCREEN_LCD || !ui->checkSkin->isChecked()) {
++        return;
++    }
++    DockWidget *keypadDock = findChild<DockWidget *>(QStringLiteral("keypadWidget_dock"));
++    if (!keypadDock || !ui->screenDock->isVisible() || !keypadDock->isVisible()) {
++        return;
++    }
++    if (ui->screenDock->isFloating() || keypadDock->isFloating()) {
++        return;
++    }
++
++    // CE proportions, straight out of CEmu's own numbers: the screen widget is
++    // 440x351 at scale 1, and the keypad's base rect is 162x238, so at the screen's
++    // width it is 440 * 238/162 = 646.4 tall. The stack is 440 x 997.4, which is
++    // aspect 0.4411 against the real calculator's 84/190 = 0.4421.
++    const double kScreenW = 440.0, kScreenH = 351.0;
++    const double kTotalH = kScreenH + kScreenW * 238.0 / 162.0;
++
++    const int availW = qMin(ui->screenDock->width(), keypadDock->width());
++    const int availH = ui->screenDock->height() + keypadDock->height();
++    if (availW <= 0 || availH <= 0) {
++        return;
++    }
++
++    int pct = static_cast<int>(qMin(availW / kScreenW, availH / kTotalH) * 100.0);
++    pct = qBound(10, pct, 800);
++
++    const int screenH = qRound(kScreenH * pct / 100.0);
++    if (pct == ui->scaleLCD->value() && ui->screenDock->height() == screenH) {
++        return;   // already settled -- stopping here is what keeps this from looping
++    }
++
++    m_scaling = true;
++    if (pct != ui->scaleLCD->value()) {
++        ui->scaleLCD->blockSignals(true);
++        ui->scaleLCD->setValue(pct);
++        ui->scaleLCD->blockSignals(false);
++        m_config->setValue(SETTING_SCREEN_SCALE, pct);
++    }
++    lcdAdjust();
++    resizeDocks({ui->screenDock, keypadDock}, {screenH, availH - screenH}, Qt::Vertical);
++    m_scaling = false;
++}
++
+ void MainWindow::setLcdUpscale(int value) {
+     m_config->setValue(SETTING_SCREEN_UPSCALE, value);
+     ui->upscaleLCD->setCurrentIndex(value);
